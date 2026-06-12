@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // ChatPanel Bridge — a tiny localhost server that exposes the coding agents
-// running on this machine (Claude Code via the Agent SDK, Codex via its CLI) to
-// the ChatPanel Chrome extension. Zero runtime dependencies beyond the optional
-// Claude Agent SDK.
+// running on this machine (Claude Code via the Agent SDK, Codex and Gemini via
+// their CLIs) to the ChatPanel Chrome extension. Zero runtime dependencies
+// beyond the optional Claude Agent SDK.
 //
 //   GET  /health  → { ok, version, agents: [{id,label,available,reason}] }
 //   POST /chat    → Server-Sent Events stream of { type, ... }:
@@ -17,6 +17,7 @@
 import { createServer } from 'node:http';
 import * as claude from './engines/claude.js';
 import * as codex from './engines/codex.js';
+import * as gemini from './engines/gemini.js';
 
 const VERSION = '0.1.0';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
@@ -25,6 +26,7 @@ const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 const ENGINES = {
   claude: { engine: claude, label: 'Claude Code' },
   codex: { engine: codex, label: 'Codex' },
+  gemini: { engine: gemini, label: 'Gemini CLI' },
 };
 
 // --------------------------------------------------------------------------
@@ -149,5 +151,5 @@ server.listen(PORT, HOST, async () => {
     const a = await engine.available().catch(() => ({ ok: false }));
     log('info', `  ${a.ok ? '✓' : '✕'} ${label}${a.ok ? '' : ' — ' + (a.reason || 'unavailable')}`);
   }
-  log('info', 'Open the ChatPanel side panel; Claude Code & Codex will appear as agents.');
+  log('info', 'Open the ChatPanel side panel; installed agents (Claude Code, Codex, Gemini CLI) appear automatically.');
 });
