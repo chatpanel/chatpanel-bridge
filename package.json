@@ -1,15 +1,24 @@
 {
-  "name": "chatpanel-bridge",
+  "name": "@chatpanel/bridge",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
   "description": "Local bridge that exposes Claude Code (Agent SDK) and Codex (CLI) to the ChatPanel Chrome extension over a localhost SSE endpoint.",
+  "keywords": ["chatpanel", "claude-code", "codex", "chrome-extension", "ai-agents", "bridge"],
+  "homepage": "https://chatpanel.net",
+  "repository": { "type": "git", "url": "git+https://github.com/chatpanel/chatpanel-bridge.git" },
+  "license": "MIT",
   "bin": { "chatpanel-bridge": "src/server.js" },
+  "files": ["src", "README.md", "LICENSE", ".env.example"],
+  "engines": { "node": ">=18" },
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0"
+  },
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/",
+    "access": "public"
   }
 }

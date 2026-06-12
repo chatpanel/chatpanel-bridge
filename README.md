@@ -10,18 +10,39 @@ so this bridges the gap.
 
 ## Run it
 
+**No clone, no install** — `npx` fetches the package (and its one dependency) and
+starts the server:
+
 ```bash
-cd bridge
-npm install      # installs the Claude Agent SDK (Codex just needs the CLI)
-npm start        # → http://127.0.0.1:4319
+npx @chatpanel/bridge        # → http://127.0.0.1:4319
 ```
 
-Prerequisites:
+…then leave it running and open the ChatPanel side panel. That's the whole setup.
+
+Prefer a persistent command? Install it globally:
+
+```bash
+npm i -g @chatpanel/bridge
+chatpanel-bridge             # → http://127.0.0.1:4319
+```
+
+Prerequisites (the agents you want to use must already be set up):
 
 - **Claude Code**: be signed in (`claude`) or set `ANTHROPIC_API_KEY`.
 - **Codex**: `codex` on your `PATH` and `codex login` done.
 
 The extension polls `/health` and shows each agent as available/unavailable.
+
+## Develop (from source)
+
+Only if you're hacking on the bridge itself:
+
+```bash
+git clone https://github.com/chatpanel/chatpanel-bridge
+cd chatpanel-bridge
+npm install
+npm start                    # → http://127.0.0.1:4319
+```
 
 ## API
 
