@@ -1,6 +1,6 @@
 {
   "name": "@chatpanel/bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "Local bridge that exposes Claude Code (Agent SDK) and Codex (CLI) to the ChatPanel Chrome extension over a localhost SSE endpoint.",
   "keywords": ["chatpanel", "claude-code", "codex", "chrome-extension", "ai-agents", "bridge"],
