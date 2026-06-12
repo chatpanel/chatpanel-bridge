@@ -7,6 +7,10 @@ so this bridges the gap.
 - **Claude Code** — embedded via `@anthropic-ai/claude-agent-sdk`, using your
   existing Claude Code login (or `ANTHROPIC_API_KEY`).
 - **Codex** — driven via the `codex exec` CLI, using your `codex login`.
+- **Gemini CLI** — driven via the `gemini -p` CLI, using your `gemini` login.
+
+Bring whichever agent you already have installed — the extension auto-detects
+the ones the bridge reports as available.
 
 ## Run it
 

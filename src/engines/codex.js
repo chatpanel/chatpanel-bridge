@@ -58,14 +58,6 @@ function ensureIsolatedHome() {
   return ISO_HOME;
 }
 
-const BASE_GUIDANCE =
-  'You are ChatPanel, an AI assistant in a browser side panel. Answer the ' +
-  "user's question using the <context> blocks provided (web pages or selections). " +
-  'Do NOT search the filesystem or read local files for general questions — ' +
-  'everything you need is in the prompt. Only inspect files if the user explicitly ' +
-  'asks about local code or a project. When asked for a table, return GitHub-' +
-  'flavored Markdown.';
-
 let installed = null;
 export async function available() {
   if (installed === null) {
@@ -82,7 +74,7 @@ export async function available() {
 }
 
 function buildPrompt(messages, system) {
-  let p = `${[BASE_GUIDANCE, system].filter(Boolean).join('\n\n')}\n\n`;
+  let p = system ? `${system}\n\n` : '';
   const history = messages.slice(0, -1);
   const last = messages[messages.length - 1];
   if (history.length) {

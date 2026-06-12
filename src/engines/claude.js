@@ -10,14 +10,6 @@
 import path from 'node:path';
 import os from 'node:os';
 
-// Always-on guidance so the coding agent behaves like a browser assistant by
-// default: prefer the page context the extension attaches over scanning files.
-const BASE_GUIDANCE =
-  'You are ChatPanel, an AI assistant living in a browser side panel. When the ' +
-  "user's message includes <context> blocks (extracted web pages or selections), " +
-  'answer primarily from those. Only read or modify local files when the user ' +
-  'explicitly asks about code or a project.';
-
 let sdkPromise = null;
 function loadSdk() {
   if (!sdkPromise) sdkPromise = import('@anthropic-ai/claude-agent-sdk').catch(() => null);
@@ -86,11 +78,12 @@ export async function chat({ messages, system, options }, emit) {
       // servers and CLAUDE.md apply. Turn the agent's "Use my local skills &
       // config" off to run clean.
       settingSources: options.useLocalConfig === false ? [] : ['user', 'project'],
-      systemPrompt: {
-        type: 'preset',
-        preset: 'claude_code',
-        append: [BASE_GUIDANCE, system].filter(Boolean).join('\n\n'),
-      },
+      // Native Claude Code system prompt. Only append the user's OWN system
+      // prompt if they set one — no ChatPanel persona is injected, so the agent
+      // is exactly as capable as it is in the terminal.
+      systemPrompt: system
+        ? { type: 'preset', preset: 'claude_code', append: system }
+        : { type: 'preset', preset: 'claude_code' },
       ...(options.model ? { model: options.model } : {}),
       ...(process.env.CHATPANEL_MAX_TURNS ? { maxTurns: Number(process.env.CHATPANEL_MAX_TURNS) } : {}),
     },
@@ -99,9 +92,14 @@ export async function chat({ messages, system, options }, emit) {
   for await (const message of iterator) {
     if (message.type === 'stream_event') {
       const ev = message.event;
-      if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
-        streamedAny = true;
-        emit({ type: 'delta', text: ev.delta.text });
+      if (ev?.type === 'content_block_delta') {
+        if (ev.delta?.type === 'text_delta') {
+          streamedAny = true;
+          emit({ type: 'delta', text: ev.delta.text });
+        } else if (ev.delta?.type === 'thinking_delta') {
+          // Extended thinking — stream the reasoning text to the panel.
+          emit({ type: 'reasoning', text: ev.delta.thinking || '' });
+        }
       }
     } else if (message.type === 'assistant') {
       for (const block of message.message.content) {
