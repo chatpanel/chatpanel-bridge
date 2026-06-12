@@ -1,0 +1,43 @@
+# Publish @chatpanel/bridge to npm via OIDC Trusted Publishing — NO token.
+# This file lives in the PUBLIC chatpanel/chatpanel-bridge repo (it's synced there
+# from the monorepo by scripts/publish-bridge.sh). Public repo → provenance works.
+#
+# One-time setup on npmjs.com: package @chatpanel/bridge → Settings → Trusted
+# Publisher → GitHub Actions, repository "chatpanel/chatpanel-bridge", workflow
+# filename "publish.yml". After that, bump the version and push — it publishes
+# itself, tokenless. Version-guarded, so unchanged versions just skip.
+name: Publish to npm
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # required for OIDC trusted publishing + provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Ensure npm supports trusted publishing (>= 11.5.1)
+        run: npm install -g npm@latest
+
+      - name: Publish if the version is new
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VER=$(node -p "require('./package.json').version")
+          if npm view "$NAME@$VER" version >/dev/null 2>&1; then
+            echo "$NAME@$VER already on npm — bump the version to publish."
+          else
+            npm publish --provenance --access public
+            echo "Published $NAME@$VER"
+          fi
