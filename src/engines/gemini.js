@@ -16,12 +16,16 @@ import path from 'node:path';
 const TIMEOUT_MS = Number(process.env.CHATPANEL_GEMINI_TIMEOUT_MS) || 180_000;
 const SCRATCH = path.join(os.tmpdir(), 'chatpanel-gemini-scratch');
 
-let installed = null;
+let installed = false;
+let lastProbe = 0;
 export async function available() {
-  if (installed === null) {
+  // Cache a positive result, but keep re-probing (throttled) while not found, so
+  // it self-heals once gemini appears on PATH — never cache a negative forever.
+  if (!installed && Date.now() - lastProbe > 4000) {
+    lastProbe = Date.now();
     try {
-      const r = spawnSync('gemini', ['--version'], { stdio: 'ignore', timeout: 5000 });
-      installed = r.status === 0 || (r.status === null && r.error === undefined);
+      const r = spawnSync('gemini', ['--version'], { stdio: 'ignore', timeout: 8000 });
+      installed = r.status === 0 || (r.status === null && !r.error);
     } catch {
       installed = false;
     }

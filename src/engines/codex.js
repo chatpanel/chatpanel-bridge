@@ -58,12 +58,16 @@ function ensureIsolatedHome() {
   return ISO_HOME;
 }
 
-let installed = null;
+let installed = false;
+let lastProbe = 0;
 export async function available() {
-  if (installed === null) {
+  // Cache a positive result, but keep re-probing (throttled) while not found, so
+  // it self-heals once codex appears on PATH — never cache a negative forever.
+  if (!installed && Date.now() - lastProbe > 4000) {
+    lastProbe = Date.now();
     try {
-      const r = spawnSync('codex', ['--version'], { stdio: 'ignore', timeout: 5000 });
-      installed = r.status === 0 || (r.status === null && r.error === undefined);
+      const r = spawnSync('codex', ['--version'], { stdio: 'ignore', timeout: 8000 });
+      installed = r.status === 0 || (r.status === null && !r.error);
     } catch {
       installed = false;
     }
