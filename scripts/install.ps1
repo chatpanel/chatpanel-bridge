@@ -6,9 +6,7 @@
 # so Windows SmartScreen won't warn the way a browser download would.
 $ErrorActionPreference = 'Stop'
 
-$repo  = 'chatpanel/chatpanel-bridge'
-$asset = 'chatpanel-bridge-windows-x64.exe'
-$url   = "https://github.com/$repo/releases/latest/download/$asset"
+$url   = 'https://dl.chatpanel.net/bridge/windows-x64.exe'
 $dir   = Join-Path $env:LOCALAPPDATA 'ChatPanel'
 $bin   = Join-Path $dir 'chatpanel-bridge.exe'
 
@@ -18,7 +16,7 @@ Start-Sleep -Milliseconds 300
 
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
-Write-Host "Downloading $asset ..."
+Write-Host "Downloading ChatPanel Bridge ..."
 Invoke-WebRequest -Uri $url -OutFile $bin -UseBasicParsing
 Unblock-File -Path $bin -ErrorAction SilentlyContinue
 

@@ -18,12 +18,12 @@ the ones the bridge reports as available.
 
 **macOS / Linux:**
 ```bash
-curl -fsSL https://raw.githubusercontent.com/chatpanel/chatpanel-bridge/main/scripts/install.sh | bash
+curl -fsSL https://dl.chatpanel.net/bridge/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://raw.githubusercontent.com/chatpanel/chatpanel-bridge/main/scripts/install.ps1 | iex
+irm https://dl.chatpanel.net/bridge/install.ps1 | iex
 ```
 
 This downloads the standalone binary for your OS, installs it, and sets it to

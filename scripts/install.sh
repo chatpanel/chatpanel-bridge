@@ -8,7 +8,6 @@
 # "damaged / unidentified developer" prompt that browser downloads trigger.
 set -euo pipefail
 
-REPO="chatpanel/chatpanel-bridge"
 os="$(uname -s)"
 arch="$(uname -m)"
 asset=""
@@ -16,14 +15,14 @@ asset=""
 case "$os" in
   Darwin)
     if [ "$arch" = "arm64" ]; then
-      asset="chatpanel-bridge-macos-arm64"
+      asset="bridge/macos-arm64"
     else
       echo "Intel Mac detected - no x64 binary yet. Use:  npx @chatpanel/bridge  (needs Node.js 18+)"
       exit 1
     fi
     ;;
   Linux)
-    asset="chatpanel-bridge-linux-x64"
+    asset="bridge/linux-x64"
     ;;
   *)
     echo "Unsupported OS ($os). Use:  npx @chatpanel/bridge  (needs Node.js 18+)"
@@ -31,7 +30,7 @@ case "$os" in
     ;;
 esac
 
-url="https://github.com/${REPO}/releases/latest/download/${asset}"
+url="https://dl.chatpanel.net/${asset}"
 dest="${HOME}/.local/bin"
 bin="${dest}/chatpanel-bridge"
 mkdir -p "$dest"
