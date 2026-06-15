@@ -1,9 +1,12 @@
 # Compile the bridge into standalone binaries and attach them to the GitHub
 # Release, so non-technical users can download a single file (no Node needed).
 #
-# Trigger by pushing a tag like `v0.2.0`. Phase A ships UNSIGNED binaries — macOS
-# Gatekeeper / Windows SmartScreen will warn until signing is wired up (Phase B,
-# which needs an Apple Developer ID + a Windows code-signing cert).
+# Trigger by pushing a tag like `v0.2.0`. Each platform builds on its OWN native
+# runner: the Claude Agent SDK pulls in a native dependency (sharp), which can't
+# be cross-compiled, so we install with `npm ci` and compile with Bun per-OS.
+#
+# Phase A ships UNSIGNED binaries — macOS Gatekeeper / Windows SmartScreen will
+# warn until signing is wired up (Phase B: Apple Developer ID + Windows cert).
 name: Release binaries
 
 on:
@@ -16,29 +19,49 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            out: chatpanel-bridge-linux-x64
+          - os: macos-14
+            out: chatpanel-bridge-macos-arm64
+          - os: macos-13
+            out: chatpanel-bridge-macos-x64
+          - os: windows-latest
+            out: chatpanel-bridge-windows-x64.exe
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # npm is reliable on the runners; installs the platform-correct native deps.
+      - run: npm ci || npm install
+
       - uses: oven-sh/setup-bun@v2
 
-      # Install deps so the Claude Agent SDK is bundled into the binary.
-      - run: bun install --frozen-lockfile || bun install
+      # Native build (no --target): bundles this platform's native addons.
+      - name: Build ${{ matrix.out }}
+        shell: bash
+        run: |
+          mkdir -p dist
+          bun build src/server.js --compile --outfile "dist/${{ matrix.out }}"
 
-      - name: Build binaries (mac arm64/x64, linux, windows)
-        run: bash scripts/build-binaries.sh
-
-      - name: Attach binaries to the release
+      - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/chatpanel-bridge-*
+          files: dist/${{ matrix.out }}
           body: |
             Standalone ChatPanel Bridge binaries — no Node.js required.
 
             **Run once to install background auto-start:**
-            - macOS / Linux: `./chatpanel-bridge-* --install`
+            - macOS / Linux: `chmod +x chatpanel-bridge-* && ./chatpanel-bridge-* --install`
             - Windows: `chatpanel-bridge-windows-x64.exe --install`
 
-            ⚠️ These builds are not yet code-signed, so macOS Gatekeeper / Windows
-            SmartScreen may warn on first run. (Signing is coming.)
+            ⚠️ Not yet code-signed, so macOS Gatekeeper / Windows SmartScreen may
+            warn on first run (on macOS: right-click → Open). Signing is coming.
