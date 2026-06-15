@@ -1,8 +1,11 @@
 # ChatPanel Bridge installer (Windows) - no Node.js required.
 #
 #   irm https://dl.chatpanel.net/bridge/install.ps1 | iex
-$ErrorActionPreference = 'Stop'
-$ProgressPreference = 'SilentlyContinue'   # IWR fallback: skip the slow progress bar
+#
+# Note: no `$ErrorActionPreference = 'Stop'` here, because native tools (schtasks,
+# curl) write progress/notices to stderr and that would be treated as fatal. We
+# check exit codes explicitly instead.
+$ProgressPreference = 'SilentlyContinue'
 
 $url = 'https://dl.chatpanel.net/bridge/windows-x64.exe'
 $dir = Join-Path $env:LOCALAPPDATA 'ChatPanel'
@@ -12,26 +15,32 @@ $tmp = "$bin.new"
 Write-Host ""
 Write-Host "Installing ChatPanel Bridge" -ForegroundColor Cyan
 
-# Stop any running bridge + its scheduled task so the .exe isn't locked (clean
-# in-place upgrade, no duplicate installs).
-schtasks /End /TN ChatPanelBridge *> $null
+# Stop any running bridge + its scheduled task for a clean in-place upgrade.
+# Run schtasks inside cmd so its "not found" stderr never reaches PowerShell.
+cmd /c "schtasks /End /TN ChatPanelBridge >nul 2>&1"
 Get-Process -Name 'chatpanel-bridge' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 600
 
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
 Write-Host "  Downloading the bridge (~60 MB)..." -ForegroundColor Gray
-$curl = Get-Command curl.exe -ErrorAction SilentlyContinue
-if ($curl) {
-  & curl.exe -fL --progress-bar -o $tmp $url      # fast, with a real progress bar
+$ok = $false
+if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+  & curl.exe -fL --progress-bar -o "$tmp" "$url"      # fast, real progress bar
+  $ok = ($LASTEXITCODE -eq 0)
 } else {
-  Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+  try { Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing; $ok = $true } catch { $ok = $false }
 }
-Unblock-File -Path $tmp -ErrorAction SilentlyContinue   # no SmartScreen mark-of-the-web
-Move-Item -Force $tmp $bin
+if (-not $ok -or -not (Test-Path "$tmp")) {
+  Write-Host "Download failed - check your connection and re-run." -ForegroundColor Red
+  return
+}
+
+Unblock-File -Path "$tmp" -ErrorAction SilentlyContinue   # no SmartScreen mark-of-the-web
+Move-Item -Force "$tmp" "$bin"
 
 Write-Host "  Setting it to start at login..." -ForegroundColor Gray
-& $bin --install
+& "$bin" --install
 
 Write-Host ""
 Write-Host "Done. ChatPanel Bridge is running and starts at login." -ForegroundColor Green
