@@ -122,6 +122,38 @@ export async function chat({ messages, system, options }, emit) {
   emit({ type: 'done', text: streamedAny ? '' : resultText });
 }
 
+// A fast, tool-free single-shot completion — used for prompt autocomplete. No
+// claude_code preset, no tools, no local config: just a quick text continuation
+// from a fast model (Haiku by default). Returns the completion string.
+export async function complete({ prompt, system, model }) {
+  const sdk = await loadSdk();
+  if (!sdk) throw new Error('Claude Agent SDK not installed.');
+  const { query } = sdk;
+  let text = '';
+  const iterator = query({
+    prompt,
+    options: {
+      cwd: os.homedir(),
+      permissionMode: 'default',
+      allowedTools: [], // no tools — pure text completion
+      maxTurns: 1,
+      settingSources: [], // skip CLAUDE.md / MCP for a tiny completion
+      systemPrompt: system || "Continue the user's text briefly. Reply with only the continuation.",
+      model: model || 'haiku',
+    },
+  });
+  for await (const message of iterator) {
+    if (message.type === 'assistant') {
+      for (const block of message.message.content) {
+        if (block.type === 'text') text += block.text;
+      }
+    } else if (message.type === 'result' && message.subtype === 'success' && !text) {
+      text = message.result || '';
+    }
+  }
+  return text.trim();
+}
+
 function toolSummary(block) {
   const i = block.input || {};
   if (i.command) return String(i.command).slice(0, 60);
