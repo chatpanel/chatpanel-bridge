@@ -20,7 +20,7 @@ import * as codex from './engines/codex.js';
 import * as gemini from './engines/gemini.js';
 import { installService, uninstallService, serviceStatus } from './service.js';
 
-const VERSION = '0.2.0';
+const VERSION = '0.2.1';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -137,13 +137,15 @@ async function handleComplete(req, res) {
   }
   const target = ENGINES[body.agent];
   if (!target) return json(res, 404, { error: `Unknown agent "${body.agent}"` });
-  const prompt = String(body.prompt || '').slice(0, 4000);
+  const prompt = String(body.prompt || '').slice(0, 6000);
   if (!prompt) return json(res, 400, { error: 'Empty prompt' });
   const model = body.model || '';
+  // The extension sends a strict "continue, don't answer" system prompt (with any
+  // page context already in `prompt`); fall back to a sensible default.
   const system =
-    'You autocomplete a prompt the user is typing to an AI assistant. Continue it ' +
-    'briefly — a few words to one short sentence. Reply with ONLY the continuation ' +
-    'that comes after their text. No quotes, no repetition.';
+    String(body.system || '').slice(0, 2000) ||
+    'You autocomplete an unfinished message the user is typing. Output ONLY the ' +
+      'few words that come next. Do not answer it. No quotes, no repetition.';
   try {
     let text = '';
     if (typeof target.engine.complete === 'function') {
