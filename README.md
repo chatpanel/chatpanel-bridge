@@ -14,30 +14,39 @@ the ones the bridge reports as available.
 
 ## Run it
 
-### Option A — download the app (no Node.js needed)
-
-Grab the standalone binary for your OS from the
-[latest release](https://github.com/chatpanel/chatpanel-bridge/releases/latest) —
-it bundles its own runtime, so **nothing to install**. Run it once to set it up to
-start automatically at login and run in the background:
+### Option A — one-line install (macOS / Linux, no Node.js needed)
 
 ```bash
-# macOS / Linux (make it executable first on macOS)
+curl -fsSL https://raw.githubusercontent.com/chatpanel/chatpanel-bridge/main/scripts/install.sh | bash
+```
+
+This downloads the standalone binary for your OS, installs it to `~/.local/bin`,
+and sets it to start at login. **Recommended** — installing via curl avoids the
+macOS "damaged / unidentified developer" prompt that browser downloads trigger.
+Then open the ChatPanel side panel and your agents appear.
+
+Manage it: `chatpanel-bridge --status` · `--uninstall` · run with no flags to start
+once in the foreground.
+
+### Manual download
+
+Grab the binary from the
+[latest release](https://github.com/chatpanel/chatpanel-bridge/releases/latest) and:
+
+```bash
+# macOS (clear the download quarantine first, then install)
+xattr -cr chatpanel-bridge-macos-arm64
 chmod +x chatpanel-bridge-macos-arm64
 ./chatpanel-bridge-macos-arm64 --install
 
-# Windows (PowerShell)
+# Windows (PowerShell) — click "More info → Run anyway" if SmartScreen warns
 .\chatpanel-bridge-windows-x64.exe --install
 ```
 
-That's it — open the ChatPanel side panel and your agents appear. Manage it with
-`--status` (is it set up?) and `--uninstall` (remove auto-start). Run with no flags
-to start it once in the foreground instead.
-
-> Until these binaries are code-signed, macOS Gatekeeper / Windows SmartScreen may
-> warn on first run (on macOS, right-click the file → **Open**). Signing is on the way.
+> These binaries aren't notarized yet, so macOS/Windows may warn on first run.
+> The curl installer above sidesteps the macOS prompt entirely.
 >
-> **Intel Mac?** There's no x64 binary yet — use **Option B** (`npx @chatpanel/bridge`).
+> **Intel Mac?** No x64 binary yet — use **Option B** (`npx @chatpanel/bridge`).
 > Apple Silicon (`uname -m` → `arm64`) uses `chatpanel-bridge-macos-arm64`.
 
 ### Option B — via npm (needs Node.js 18+)

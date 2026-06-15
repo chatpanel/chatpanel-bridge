@@ -51,6 +51,12 @@ jobs:
           mkdir -p dist
           bun build src/server.js --compile --outfile "dist/${{ matrix.out }}"
 
+      # Ad-hoc sign so macOS reports "unidentified developer" (with Open Anyway)
+      # instead of "damaged". Real notarization needs an Apple Developer ID.
+      - name: Ad-hoc sign (macOS)
+        if: runner.os == 'macOS'
+        run: codesign --force --sign - "dist/${{ matrix.out }}"
+
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
