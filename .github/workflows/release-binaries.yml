@@ -1,0 +1,44 @@
+# Compile the bridge into standalone binaries and attach them to the GitHub
+# Release, so non-technical users can download a single file (no Node needed).
+#
+# Trigger by pushing a tag like `v0.2.0`. Phase A ships UNSIGNED binaries — macOS
+# Gatekeeper / Windows SmartScreen will warn until signing is wired up (Phase B,
+# which needs an Apple Developer ID + a Windows code-signing cert).
+name: Release binaries
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      # Install deps so the Claude Agent SDK is bundled into the binary.
+      - run: bun install --frozen-lockfile || bun install
+
+      - name: Build binaries (mac arm64/x64, linux, windows)
+        run: bash scripts/build-binaries.sh
+
+      - name: Attach binaries to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/chatpanel-bridge-*
+          body: |
+            Standalone ChatPanel Bridge binaries — no Node.js required.
+
+            **Run once to install background auto-start:**
+            - macOS / Linux: `./chatpanel-bridge-* --install`
+            - Windows: `chatpanel-bridge-windows-x64.exe --install`
+
+            ⚠️ These builds are not yet code-signed, so macOS Gatekeeper / Windows
+            SmartScreen may warn on first run. (Signing is coming.)

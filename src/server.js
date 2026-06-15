@@ -18,8 +18,9 @@ import { createServer } from 'node:http';
 import * as claude from './engines/claude.js';
 import * as codex from './engines/codex.js';
 import * as gemini from './engines/gemini.js';
+import { installService, uninstallService, serviceStatus } from './service.js';
 
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -145,11 +146,74 @@ function log(level, msg) {
   fn(`[chatpanel-bridge] ${msg}`);
 }
 
-server.listen(PORT, HOST, async () => {
-  log('info', `listening on http://${HOST}:${PORT}`);
-  for (const [id, { engine, label }] of Object.entries(ENGINES)) {
-    const a = await engine.available().catch(() => ({ ok: false }));
-    log('info', `  ${a.ok ? '✓' : '✕'} ${label}${a.ok ? '' : ' — ' + (a.reason || 'unavailable')}`);
+function startServer() {
+  server.listen(PORT, HOST, async () => {
+    log('info', `listening on http://${HOST}:${PORT}`);
+    for (const [, { engine, label }] of Object.entries(ENGINES)) {
+      const a = await engine.available().catch(() => ({ ok: false }));
+      log('info', `  ${a.ok ? '✓' : '✕'} ${label}${a.ok ? '' : ' — ' + (a.reason || 'unavailable')}`);
+    }
+    log('info', 'Open the ChatPanel side panel; installed agents (Claude Code, Codex, Gemini CLI) appear automatically.');
+  });
+}
+
+function printHelp() {
+  console.log(`ChatPanel Bridge v${VERSION}
+
+Usage:
+  chatpanel-bridge              start the bridge (foreground) on ${HOST}:${PORT}
+  chatpanel-bridge --install    run automatically at login, in the background
+  chatpanel-bridge --uninstall  remove the login auto-start
+  chatpanel-bridge --status     show whether auto-start is set up
+  chatpanel-bridge --version    print the version
+
+Env: CHATPANEL_BRIDGE_HOST, CHATPANEL_BRIDGE_PORT`);
+}
+
+// Handle CLI commands before starting the server. Returns true if a command ran.
+function runCli() {
+  const argv = process.argv;
+  const has = (...flags) => flags.some((f) => argv.includes(f));
+
+  if (has('--help', '-h')) {
+    printHelp();
+    return true;
   }
-  log('info', 'Open the ChatPanel side panel; installed agents (Claude Code, Codex, Gemini CLI) appear automatically.');
-});
+  if (has('--version', '-v')) {
+    console.log(VERSION);
+    return true;
+  }
+  if (has('--install')) {
+    try {
+      installService();
+      log('info', 'Installed. The bridge now starts automatically at login and is running in the background.');
+    } catch (e) {
+      log('error', 'Install failed: ' + (e?.message || e));
+      process.exitCode = 1;
+    }
+    return true;
+  }
+  if (has('--uninstall')) {
+    try {
+      uninstallService();
+      log('info', 'Removed the login auto-start.');
+    } catch (e) {
+      log('error', 'Uninstall failed: ' + (e?.message || e));
+      process.exitCode = 1;
+    }
+    return true;
+  }
+  if (has('--status')) {
+    let on = false;
+    try {
+      on = serviceStatus();
+    } catch (e) {
+      log('error', String(e?.message || e));
+    }
+    log('info', `auto-start: ${on ? 'installed' : 'not installed'}`);
+    return true;
+  }
+  return false;
+}
+
+if (!runCli()) startServer();
