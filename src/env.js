@@ -8,9 +8,35 @@
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { readdirSync, existsSync } from 'node:fs';
 
 let enriched = false;
+
+// The agent CLIs the bridge shells out to (Claude is the in-process SDK).
+const AGENT_CLIS = ['codex', 'gemini'];
+
+// Is `name` executable somewhere on the current PATH?
+function onPath(name) {
+  const dirs = (process.env.PATH || '').split(path.delimiter);
+  return dirs.some((d) => d && (existsSync(path.join(d, name)) || existsSync(path.join(d, name + '.exe'))));
+}
+
+// Ask the user's login shell to locate a command — no hardcoded locations, works
+// wherever the user actually installed it.
+function shellWhich(name) {
+  if (process.platform === 'win32') return '';
+  try {
+    const shell = process.env.SHELL || '/bin/zsh';
+    const r = spawnSync(shell, ['-ilc', `command -v ${name} 2>/dev/null`], {
+      encoding: 'utf8',
+      timeout: 4000,
+    });
+    const out = (r.stdout || '').trim().split('\n').pop().trim();
+    return out && out.startsWith('/') ? out : '';
+  } catch {
+    return '';
+  }
+}
 
 // Version managers install CLIs under versioned bin dirs that a lazy-loaded
 // shell (nvm/fnm) doesn't export into a non-interactive service PATH. Add them.
@@ -80,4 +106,13 @@ export function enrichPath() {
   ].filter((p) => p && !seen.has(p) && (seen.add(p), true));
 
   process.env.PATH = merged.join(path.delimiter);
+
+  // Final, hardcode-free backstop: if an agent CLI still isn't on PATH, ask the
+  // login shell exactly where it is and prepend that dir. Covers any custom
+  // install location (asdf shims, a one-off prefix, etc.).
+  for (const cli of AGENT_CLIS) {
+    if (onPath(cli)) continue;
+    const found = shellWhich(cli);
+    if (found) process.env.PATH = path.dirname(found) + path.delimiter + process.env.PATH;
+  }
 }
