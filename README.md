@@ -14,21 +14,37 @@ the ones the bridge reports as available.
 
 ## Run it
 
-**No clone, no install** — `npx` fetches the package (and its one dependency) and
-starts the server:
+### Option A — download the app (no Node.js needed)
+
+Grab the standalone binary for your OS from the
+[latest release](https://github.com/chatpanel/chatpanel-bridge/releases/latest) —
+it bundles its own runtime, so **nothing to install**. Run it once to set it up to
+start automatically at login and run in the background:
+
+```bash
+# macOS / Linux (make it executable first on macOS)
+chmod +x chatpanel-bridge-macos-arm64
+./chatpanel-bridge-macos-arm64 --install
+
+# Windows (PowerShell)
+.\chatpanel-bridge-windows-x64.exe --install
+```
+
+That's it — open the ChatPanel side panel and your agents appear. Manage it with
+`--status` (is it set up?) and `--uninstall` (remove auto-start). Run with no flags
+to start it once in the foreground instead.
+
+> Until these binaries are code-signed, macOS Gatekeeper / Windows SmartScreen may
+> warn on first run (on macOS, right-click the file → **Open**). Signing is on the way.
+
+### Option B — via npm (needs Node.js 18+)
 
 ```bash
 npx @chatpanel/bridge        # → http://127.0.0.1:4319
 ```
 
-…then leave it running and open the ChatPanel side panel. That's the whole setup.
-
-Prefer a persistent command? Install it globally:
-
-```bash
-npm i -g @chatpanel/bridge
-chatpanel-bridge             # → http://127.0.0.1:4319
-```
+…then leave it running and open the ChatPanel side panel. Prefer a persistent
+command? `npm i -g @chatpanel/bridge` then `chatpanel-bridge`.
 
 Prerequisites (the agents you want to use must already be set up):
 
