@@ -1,18 +1,40 @@
 {
   "name": "@chatpanel/bridge",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "type": "module",
   "description": "Local bridge that exposes the AI coding agents installed on your machine — Claude Code (Agent SDK), Codex (CLI), and Gemini CLI — to the ChatPanel Chrome extension over a localhost SSE endpoint. Bring your own agent.",
-  "keywords": ["chatpanel", "claude-code", "codex", "gemini-cli", "chrome-extension", "ai-agents", "bridge"],
+  "keywords": [
+    "chatpanel",
+    "claude-code",
+    "codex",
+    "gemini-cli",
+    "chrome-extension",
+    "ai-agents",
+    "bridge"
+  ],
   "homepage": "https://chatpanel.net",
-  "repository": { "type": "git", "url": "git+https://github.com/chatpanel/chatpanel-bridge.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chatpanel/chatpanel-bridge.git"
+  },
   "license": "MIT",
-  "bin": { "chatpanel-bridge": "src/server.js" },
-  "files": ["src", "README.md", "LICENSE", ".env.example"],
-  "engines": { "node": ">=18" },
+  "bin": {
+    "chatpanel-bridge": "src/server.js"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "README.md",
+    "LICENSE",
+    ".env.example"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js"
+    "dev": "node --watch src/server.js",
+    "build:bin": "bash scripts/build-binaries.sh"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.1.0"
