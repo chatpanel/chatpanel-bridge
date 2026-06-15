@@ -12,6 +12,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { findAgentBin } from '../env.js';
 
 const TIMEOUT_MS = Number(process.env.CHATPANEL_GEMINI_TIMEOUT_MS) || 180_000;
 const SCRATCH = path.join(os.tmpdir(), 'chatpanel-gemini-scratch');
@@ -24,8 +25,7 @@ export async function available() {
   if (!installed && Date.now() - lastProbe > 4000) {
     lastProbe = Date.now();
     try {
-      const r = spawnSync('gemini', ['--version'], { stdio: 'ignore', timeout: 8000 });
-      installed = r.status === 0 || (r.status === null && !r.error);
+      installed = !!findAgentBin('gemini');
     } catch {
       installed = false;
     }

@@ -15,13 +15,14 @@
 // Binds to 127.0.0.1 only and accepts requests from the extension origin.
 
 import { createServer } from 'node:http';
+import os from 'node:os';
 import * as claude from './engines/claude.js';
 import * as codex from './engines/codex.js';
 import * as gemini from './engines/gemini.js';
 import { installService, uninstallService, serviceStatus } from './service.js';
-import { enrichPath } from './env.js';
+import { enrichPath, findAgentBin } from './env.js';
 
-const VERSION = '0.2.6';
+const VERSION = '0.2.7';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -175,6 +176,15 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
     if (req.method === 'GET' && url.pathname === '/health') return handleHealth(res);
+    if (req.method === 'GET' && url.pathname === '/debug') {
+      return json(res, 200, {
+        version: VERSION,
+        home: os.homedir(),
+        codex: findAgentBin('codex') || null,
+        gemini: findAgentBin('gemini') || null,
+        path: process.env.PATH,
+      });
+    }
     if (req.method === 'POST' && url.pathname === '/chat') return handleChat(req, res);
     if (req.method === 'POST' && url.pathname === '/complete') return handleComplete(req, res);
     json(res, 404, { error: 'Not found' });

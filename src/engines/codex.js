@@ -19,6 +19,7 @@ import { readFile, unlink } from 'node:fs/promises';
 import { existsSync, mkdirSync, symlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { findAgentBin } from '../env.js';
 
 const TIMEOUT_MS = Number(process.env.CHATPANEL_CODEX_TIMEOUT_MS) || 180_000;
 const REASONING = process.env.CHATPANEL_CODEX_EFFORT ?? 'low'; // '' → respect config
@@ -61,13 +62,13 @@ function ensureIsolatedHome() {
 let installed = false;
 let lastProbe = 0;
 export async function available() {
-  // Cache a positive result, but keep re-probing (throttled) while not found, so
-  // it self-heals once codex appears on PATH — never cache a negative forever.
+  // Availability = "is codex findable on PATH", not "does `codex --version` exit
+  // 0" (which fails when the CLI just needs login). Cache positives; re-probe
+  // (throttled) while not found so it self-heals once codex appears on PATH.
   if (!installed && Date.now() - lastProbe > 4000) {
     lastProbe = Date.now();
     try {
-      const r = spawnSync('codex', ['--version'], { stdio: 'ignore', timeout: 8000 });
-      installed = r.status === 0 || (r.status === null && !r.error);
+      installed = !!findAgentBin('codex');
     } catch {
       installed = false;
     }

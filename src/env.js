@@ -21,6 +21,20 @@ function onPath(name) {
   return dirs.some((d) => d && (existsSync(path.join(d, name)) || existsSync(path.join(d, name + '.exe'))));
 }
 
+// Resolve an agent CLI to its absolute path: first on the (enriched) PATH, then
+// by asking the login shell. Returns the path, or null. Used for availability —
+// "is it installed/findable", NOT "does `--version` exit 0" (which can fail for
+// reasons unrelated to installation, e.g. the CLI needs login).
+export function findAgentBin(name) {
+  const dirs = (process.env.PATH || '').split(path.delimiter);
+  for (const d of dirs) {
+    if (!d) continue;
+    const p = path.join(d, name);
+    if (existsSync(p) || existsSync(p + '.exe')) return p;
+  }
+  return shellWhich(name) || null;
+}
+
 // Ask the user's login shell to locate a command — no hardcoded locations, works
 // wherever the user actually installed it.
 function shellWhich(name) {
