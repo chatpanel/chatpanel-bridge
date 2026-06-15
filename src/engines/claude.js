@@ -9,6 +9,8 @@
 
 import path from 'node:path';
 import os from 'node:os';
+import { existsSync } from 'node:fs';
+import { findAgentBin, isCompiledBinary } from '../env.js';
 
 let sdkPromise = null;
 function loadSdk() {
@@ -16,14 +18,37 @@ function loadSdk() {
   return sdkPromise;
 }
 
+// Where the Claude Code CLI lives. The SDK ships a bundled cli.js, but inside a
+// compiled binary that file is on a virtual FS that child processes can't reach
+// (it fails on Windows as "B:\~BUN\cli.js"). So in a binary we point the SDK at
+// the user's INSTALLED Claude Code instead — preferring the real cli.js next to
+// the npm shim (modern Node won't spawn a .cmd directly).
+function claudeExecutable() {
+  if (process.env.CHATPANEL_CLAUDE_PATH) return process.env.CHATPANEL_CLAUDE_PATH;
+  if (!isCompiledBinary()) return undefined; // under node/bun the bundled cli.js works
+  const bin = findAgentBin('claude');
+  if (!bin) return undefined;
+  const dir = path.dirname(bin);
+  const candidates = [
+    path.join(dir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'),
+    path.join(dir, '..', 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'),
+  ];
+  for (const c of candidates) if (existsSync(c)) return c;
+  return bin;
+}
+
 export async function available() {
   const sdk = await loadSdk();
   if (!sdk) {
     return { ok: false, reason: 'Agent SDK not installed (npm i in bridge/)' };
   }
-  if (!process.env.ANTHROPIC_API_KEY) {
-    // Not fatal — the SDK can use your local Claude Code login.
-    return { ok: true };
+  // In a compiled binary the bundled CLI is unreachable, so Claude Code must be
+  // installed locally. (Under node/bun the bundled CLI works, so this is skipped.)
+  if (isCompiledBinary() && !process.env.CHATPANEL_CLAUDE_PATH && !findAgentBin('claude')) {
+    return {
+      ok: false,
+      reason: 'Claude Code not found. Install it (npm i -g @anthropic-ai/claude-code), or run the bridge with `npx @chatpanel/bridge`.',
+    };
   }
   return { ok: true };
 }
@@ -85,6 +110,7 @@ export async function chat({ messages, system, options }, emit) {
         ? { type: 'preset', preset: 'claude_code', append: system }
         : { type: 'preset', preset: 'claude_code' },
       ...(options.model ? { model: options.model } : {}),
+      ...(claudeExecutable() ? { pathToClaudeCodeExecutable: claudeExecutable() } : {}),
       ...(process.env.CHATPANEL_MAX_TURNS ? { maxTurns: Number(process.env.CHATPANEL_MAX_TURNS) } : {}),
     },
   });
@@ -140,6 +166,7 @@ export async function complete({ prompt, system, model }) {
       settingSources: [], // skip CLAUDE.md / MCP for a tiny completion
       systemPrompt: system || "Continue the user's text briefly. Reply with only the continuation.",
       model: model || 'haiku',
+      ...(claudeExecutable() ? { pathToClaudeCodeExecutable: claudeExecutable() } : {}),
     },
   });
   for await (const message of iterator) {

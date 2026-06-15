@@ -35,8 +35,8 @@ dest="${HOME}/.local/bin"
 bin="${dest}/chatpanel-bridge"
 mkdir -p "$dest"
 
-echo "Downloading ${asset} ..."
-curl -fsSL "$url" -o "$bin"
+echo "Downloading ChatPanel Bridge (~60 MB)..."
+curl -fL --progress-bar "$url" -o "$bin"   # show a progress bar (not silent)
 chmod +x "$bin"
 xattr -c "$bin" 2>/dev/null || true   # belt-and-suspenders; curl files aren't quarantined
 

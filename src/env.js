@@ -26,13 +26,25 @@ function onPath(name) {
 // "is it installed/findable", NOT "does `--version` exit 0" (which can fail for
 // reasons unrelated to installation, e.g. the CLI needs login).
 export function findAgentBin(name) {
+  // On Windows, CLIs are usually <name>.cmd / .exe / .bat (npm shims).
+  const exts = process.platform === 'win32' ? ['', '.cmd', '.exe', '.bat', '.ps1'] : [''];
   const dirs = (process.env.PATH || '').split(path.delimiter);
   for (const d of dirs) {
     if (!d) continue;
-    const p = path.join(d, name);
-    if (existsSync(p) || existsSync(p + '.exe')) return p;
+    for (const ext of exts) {
+      const p = path.join(d, name + ext);
+      if (existsSync(p)) return p;
+    }
   }
   return shellWhich(name) || null;
+}
+
+// True when running as a Bun/Node single-file compiled binary (not under a
+// node/bun interpreter). Inside such a binary, bundled JS files live on a virtual
+// FS that child processes can't reach — notably the Claude SDK's CLI on Windows.
+export function isCompiledBinary() {
+  const base = path.basename(process.execPath).toLowerCase();
+  return !(base.startsWith('node') || base.startsWith('bun'));
 }
 
 // Ask the user's login shell to locate a command — no hardcoded locations, works
