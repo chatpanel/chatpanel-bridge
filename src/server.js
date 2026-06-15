@@ -19,8 +19,9 @@ import * as claude from './engines/claude.js';
 import * as codex from './engines/codex.js';
 import * as gemini from './engines/gemini.js';
 import { installService, uninstallService, serviceStatus } from './service.js';
+import { enrichPath } from './env.js';
 
-const VERSION = '0.2.1';
+const VERSION = '0.2.2';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -188,6 +189,7 @@ function log(level, msg) {
 }
 
 function startServer() {
+  enrichPath(); // so codex/gemini are found even under a minimal service PATH
   server.listen(PORT, HOST, async () => {
     log('info', `listening on http://${HOST}:${PORT}`);
     for (const [, { engine, label }] of Object.entries(ENGINES)) {
