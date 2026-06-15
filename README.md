@@ -36,6 +36,9 @@ to start it once in the foreground instead.
 
 > Until these binaries are code-signed, macOS Gatekeeper / Windows SmartScreen may
 > warn on first run (on macOS, right-click the file → **Open**). Signing is on the way.
+>
+> **Intel Mac?** There's no x64 binary yet — use **Option B** (`npx @chatpanel/bridge`).
+> Apple Silicon (`uname -m` → `arm64`) uses `chatpanel-bridge-macos-arm64`.
 
 ### Option B — via npm (needs Node.js 18+)
 

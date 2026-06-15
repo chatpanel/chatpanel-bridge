@@ -27,8 +27,8 @@ jobs:
             out: chatpanel-bridge-linux-x64
           - os: macos-14
             out: chatpanel-bridge-macos-arm64
-          - os: macos-13
-            out: chatpanel-bridge-macos-x64
+          # macOS Intel (x64) omitted: GitHub's macos-13 runners are scarce and
+          # leave jobs queued indefinitely. Intel-Mac users use `npx @chatpanel/bridge`.
           - os: windows-latest
             out: chatpanel-bridge-windows-x64.exe
     runs-on: ${{ matrix.os }}
