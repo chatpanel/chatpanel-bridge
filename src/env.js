@@ -8,8 +8,31 @@
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { readdirSync } from 'node:fs';
 
 let enriched = false;
+
+// Version managers install CLIs under versioned bin dirs that a lazy-loaded
+// shell (nvm/fnm) doesn't export into a non-interactive service PATH. Add them.
+function versionManagerBins(home) {
+  const bins = [];
+  const tryDir = (dir, sub) => {
+    try {
+      for (const v of readdirSync(dir)) bins.push(path.join(dir, v, sub));
+    } catch {
+      /* dir absent */
+    }
+  };
+  // nvm: ~/.nvm/versions/node/<v>/bin
+  tryDir(path.join(process.env.NVM_DIR || path.join(home, '.nvm'), 'versions', 'node'), 'bin');
+  // fnm: ~/.local/share/fnm/node-versions/<v>/installation/bin (+ macOS app-support)
+  tryDir(path.join(home, '.local', 'share', 'fnm', 'node-versions'), path.join('installation', 'bin'));
+  tryDir(path.join(home, 'Library', 'Application Support', 'fnm', 'node-versions'), path.join('installation', 'bin'));
+  // volta / asdf shims
+  bins.push(path.join(home, '.volta', 'bin'));
+  bins.push(path.join(home, '.asdf', 'shims'));
+  return bins;
+}
 
 export function enrichPath() {
   if (enriched || process.platform === 'win32') {
@@ -33,6 +56,7 @@ export function enrichPath() {
     path.join(home, '.cargo', 'bin'),
     path.join(home, '.deno', 'bin'),
     path.join(home, '.bun', 'bin'),
+    ...versionManagerBins(home),
   ];
 
   // Ask the user's login shell for its PATH — captures nvm / Homebrew / asdf, etc.
