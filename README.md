@@ -14,16 +14,23 @@ the ones the bridge reports as available.
 
 ## Run it
 
-### Option A — one-line install (macOS / Linux, no Node.js needed)
+### Option A — one-line install (no Node.js needed)
 
+**macOS / Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/chatpanel/chatpanel-bridge/main/scripts/install.sh | bash
 ```
 
-This downloads the standalone binary for your OS, installs it to `~/.local/bin`,
-and sets it to start at login. **Recommended** — installing via curl avoids the
-macOS "damaged / unidentified developer" prompt that browser downloads trigger.
-Then open the ChatPanel side panel and your agents appear.
+**Windows (PowerShell):**
+```powershell
+irm https://raw.githubusercontent.com/chatpanel/chatpanel-bridge/main/scripts/install.ps1 | iex
+```
+
+This downloads the standalone binary for your OS, installs it, and sets it to
+start at login. **Recommended** — installing this way avoids the macOS "damaged"
+and Windows SmartScreen prompts that browser downloads trigger. Re-running it is a
+clean in-place upgrade (no duplicate installs). Then open the ChatPanel side panel
+and your agents appear.
 
 Manage it: `chatpanel-bridge --status` · `--uninstall` · run with no flags to start
 once in the foreground.

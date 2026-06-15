@@ -41,6 +41,11 @@ curl -fsSL "$url" -o "$bin"
 chmod +x "$bin"
 xattr -c "$bin" 2>/dev/null || true   # belt-and-suspenders; curl files aren't quarantined
 
+# Clean upgrade: stop any running bridge (incl. a stray npx one) so the new
+# install replaces it in place — same path, same service, no duplicates.
+pkill -f 'chatpanel-bridge' 2>/dev/null || true
+sleep 1
+
 echo "Installed to ${bin}"
 "$bin" --install
 echo
