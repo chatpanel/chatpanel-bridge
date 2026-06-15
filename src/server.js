@@ -125,6 +125,44 @@ async function handleChat(req, res) {
   }
 }
 
+// POST /complete → { agent, prompt, model? } → { text } — a fast, single-shot
+// completion for prompt autocomplete. Uses the engine's complete() if it has one
+// (Claude: Haiku, no tools), else a one-shot chat collected into text.
+async function handleComplete(req, res) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return json(res, 400, { error: 'Bad JSON: ' + e.message });
+  }
+  const target = ENGINES[body.agent];
+  if (!target) return json(res, 404, { error: `Unknown agent "${body.agent}"` });
+  const prompt = String(body.prompt || '').slice(0, 4000);
+  if (!prompt) return json(res, 400, { error: 'Empty prompt' });
+  const model = body.model || '';
+  const system =
+    'You autocomplete a prompt the user is typing to an AI assistant. Continue it ' +
+    'briefly — a few words to one short sentence. Reply with ONLY the continuation ' +
+    'that comes after their text. No quotes, no repetition.';
+  try {
+    let text = '';
+    if (typeof target.engine.complete === 'function') {
+      text = await target.engine.complete({ prompt, system, model });
+    } else {
+      await target.engine.chat(
+        { messages: [{ role: 'user', content: prompt }], system, options: { model } },
+        (obj) => {
+          if (obj.type === 'delta') text += obj.text || '';
+          else if (obj.type === 'done' && obj.text) text += obj.text;
+        },
+      );
+    }
+    return json(res, 200, { text: (text || '').trim() });
+  } catch (e) {
+    return json(res, 502, { error: e?.message || String(e) });
+  }
+}
+
 const server = createServer(async (req, res) => {
   cors(req, res);
   if (req.method === 'OPTIONS') {
@@ -135,6 +173,7 @@ const server = createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && url.pathname === '/health') return handleHealth(res);
     if (req.method === 'POST' && url.pathname === '/chat') return handleChat(req, res);
+    if (req.method === 'POST' && url.pathname === '/complete') return handleComplete(req, res);
     json(res, 404, { error: 'Not found' });
   } catch (e) {
     json(res, 500, { error: e?.message || String(e) });
