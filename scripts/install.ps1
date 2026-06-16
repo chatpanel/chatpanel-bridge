@@ -41,8 +41,14 @@ Move-Item -Force "$tmp" "$bin"
 
 Write-Host "  Setting it to start at login..." -ForegroundColor Gray
 & "$bin" --install
+$installed = ($LASTEXITCODE -eq 0)
 
 Write-Host ""
-Write-Host "Done. ChatPanel Bridge is running and starts at login." -ForegroundColor Green
-Write-Host "Open the ChatPanel side panel - your agents appear automatically."
+if ($installed) {
+  Write-Host "Done. ChatPanel Bridge is running and starts at login." -ForegroundColor Green
+  Write-Host "Open the ChatPanel side panel - your agents appear automatically."
+} else {
+  Write-Host "Installed, but auto-start setup hit an issue. Start it manually with:" -ForegroundColor Yellow
+  Write-Host "  `"$bin`""
+}
 Write-Host "Manage it:  `"$bin`" --status  |  --uninstall"

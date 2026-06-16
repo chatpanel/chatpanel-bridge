@@ -79,20 +79,30 @@ function macStatus() {
 }
 
 // ---------------------------------------------------------------- Windows
-const WIN_TASK = 'ChatPanelBridge';
+// Per-user auto-start via the HKCU Run key — works without admin (a scheduled
+// task can be blocked by policy: "Access is denied"). A tiny .vbs launcher runs
+// the bridge with NO console window.
+const WIN_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
+const WIN_RUN_NAME = 'ChatPanelBridge';
+const winVbs = () => path.join(path.dirname(resolveLaunch().program), 'launch.vbs');
 
 function winInstall() {
   const { program, args } = resolveLaunch();
-  const tr = [`"${program}"`, ...args.map((a) => `"${a}"`)].join(' ');
-  const r = run('schtasks', ['/Create', '/TN', WIN_TASK, '/TR', tr, '/SC', 'ONLOGON', '/RL', 'LIMITED', '/F']);
-  if (r.status !== 0) throw new Error((r.stderr || '').trim() || 'schtasks create failed');
-  run('schtasks', ['/Run', '/TN', WIN_TASK]); // start now
+  // VBS quoting: "" is a literal quote inside a string. Run(cmd, 0=hidden, False).
+  const parts = [program, ...args].map((p) => `""${p}""`).join(' ');
+  const vbs = winVbs();
+  mkdirSync(path.dirname(vbs), { recursive: true });
+  writeFileSync(vbs, `CreateObject("WScript.Shell").Run "${parts}", 0, False\r\n`);
+  const r = run('reg', ['add', WIN_RUN_KEY, '/v', WIN_RUN_NAME, '/t', 'REG_SZ', '/d', `wscript.exe "${vbs}"`, '/f']);
+  if (r.status !== 0) throw new Error((r.stderr || '').trim() || 'reg add failed');
+  run('wscript.exe', [vbs]); // start now, hidden
 }
 function winUninstall() {
-  run('schtasks', ['/Delete', '/TN', WIN_TASK, '/F']);
+  run('reg', ['delete', WIN_RUN_KEY, '/v', WIN_RUN_NAME, '/f']);
+  run('taskkill', ['/IM', 'chatpanel-bridge.exe', '/F']);
 }
 function winStatus() {
-  return run('schtasks', ['/Query', '/TN', WIN_TASK]).status === 0;
+  return run('reg', ['query', WIN_RUN_KEY, '/v', WIN_RUN_NAME]).status === 0;
 }
 
 // ---------------------------------------------------------------- Linux (systemd user)
