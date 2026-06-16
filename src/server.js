@@ -22,7 +22,7 @@ import * as gemini from './engines/gemini.js';
 import { installService, uninstallService, serviceStatus } from './service.js';
 import { enrichPath, findAgentBin } from './env.js';
 
-const VERSION = '0.2.9';
+const VERSION = '0.2.10';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 

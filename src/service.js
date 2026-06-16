@@ -84,7 +84,9 @@ function macStatus() {
 // the bridge with NO console window.
 const WIN_RUN_KEY = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run';
 const WIN_RUN_NAME = 'ChatPanelBridge';
-const winVbs = () => path.join(path.dirname(resolveLaunch().program), 'launch.vbs');
+// A user-writable location for the launcher. NOT next to the program — under
+// `npm i -g` the program is node.exe, whose dir is protected (EPERM).
+const winVbs = () => path.join(os.homedir(), '.chatpanel', 'launch.vbs');
 
 function winInstall() {
   const { program, args } = resolveLaunch();
