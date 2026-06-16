@@ -29,11 +29,22 @@ function claudeExecutable() {
   const bin = findAgentBin('claude');
   if (!bin) return undefined;
   const dir = path.dirname(bin);
-  const candidates = [
-    path.join(dir, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'),
-    path.join(dir, '..', 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'),
+  // The npm install ships cli.js; the native installer ships cli-wrapper.cjs
+  // (a JS entry next to a platform binary). Prefer either runnable JS entry over
+  // the native `claude` binary, since the SDK runs it with its own JS runtime.
+  const pkgDirs = [
+    path.join(dir, 'node_modules', '@anthropic-ai', 'claude-code'),
+    path.join(dir, '..', 'lib', 'node_modules', '@anthropic-ai', 'claude-code'),
+    // npm global on macOS/Homebrew symlinks bin/claude → ../lib/node_modules/...,
+    // so dir is already the package's own bin/ in the native install.
+    path.join(dir, '..'),
   ];
-  for (const c of candidates) if (existsSync(c)) return c;
+  for (const p of pkgDirs) {
+    for (const entry of ['cli.js', 'cli-wrapper.cjs']) {
+      const c = path.join(p, entry);
+      if (existsSync(c)) return c;
+    }
+  }
   return bin;
 }
 
