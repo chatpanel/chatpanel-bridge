@@ -14,26 +14,30 @@ the ones the bridge reports as available.
 
 ## Run it
 
-### Option A — one-line install (no Node.js needed)
+### macOS / Linux — one line, no Node.js needed
 
-**macOS / Linux:**
 ```bash
 curl -fsSL https://dl.chatpanel.net/bridge/install.sh | bash
 ```
 
-**Windows (PowerShell):**
+Downloads the standalone binary, installs it, and sets it to start at login
+(installing via curl avoids the macOS "damaged" prompt). Re-running is a clean
+in-place upgrade.
+
+### Windows — via Node (recommended)
+
+Windows SmartScreen flags unsigned downloads, so on Windows run the bridge through
+Node — you already have it if you use Claude Code / Codex / Gemini (all npm CLIs),
+and there's no security prompt:
+
 ```powershell
-irm https://dl.chatpanel.net/bridge/install.ps1 | iex
+npm i -g @chatpanel/bridge
+chatpanel-bridge --install      # starts hidden at login
 ```
 
-This downloads the standalone binary for your OS, installs it, and sets it to
-start at login. **Recommended** — installing this way avoids the macOS "damaged"
-and Windows SmartScreen prompts that browser downloads trigger. Re-running it is a
-clean in-place upgrade (no duplicate installs). Then open the ChatPanel side panel
-and your agents appear.
+Just trying it? `npx @chatpanel/bridge` runs it once in the foreground.
 
-Manage it: `chatpanel-bridge --status` · `--uninstall` · run with no flags to start
-once in the foreground.
+Manage it anywhere: `chatpanel-bridge --status` · `--uninstall`.
 
 ### Manual download
 
@@ -50,25 +54,17 @@ chmod +x chatpanel-bridge-macos-arm64
 .\chatpanel-bridge-windows-x64.exe --install
 ```
 
-> These binaries aren't notarized yet, so macOS/Windows may warn on first run.
-> The curl installer above sidesteps the macOS prompt entirely.
->
-> **Intel Mac?** No x64 binary yet — use **Option B** (`npx @chatpanel/bridge`).
-> Apple Silicon (`uname -m` → `arm64`) uses `chatpanel-bridge-macos-arm64`.
+> These binaries aren't code-signed yet, so macOS/Windows may warn on first run
+> (the curl/npm routes above sidestep that). **Intel Mac?** No x64 binary yet —
+> use npm (`npx @chatpanel/bridge`). Apple Silicon uses `chatpanel-bridge-macos-arm64`.
 
-### Option B — via npm (needs Node.js 18+)
+### Prerequisites
 
-```bash
-npx @chatpanel/bridge        # → http://127.0.0.1:4319
-```
+The agents you want to use must already be set up:
 
-…then leave it running and open the ChatPanel side panel. Prefer a persistent
-command? `npm i -g @chatpanel/bridge` then `chatpanel-bridge`.
-
-Prerequisites (the agents you want to use must already be set up):
-
-- **Claude Code**: be signed in (`claude`) or set `ANTHROPIC_API_KEY`.
+- **Claude Code**: installed and signed in (`claude`), or set `ANTHROPIC_API_KEY`.
 - **Codex**: `codex` on your `PATH` and `codex login` done.
+- **Gemini CLI**: `gemini` on your `PATH` and signed in.
 
 The extension polls `/health` and shows each agent as available/unavailable.
 
