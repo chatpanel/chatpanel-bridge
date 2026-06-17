@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 // ChatPanel Bridge — a tiny localhost server that exposes the coding agents
-// running on this machine (Claude Code via the Agent SDK, Codex and Gemini via
-// their CLIs) to the ChatPanel Chrome extension. Zero runtime dependencies
-// beyond the optional Claude Agent SDK.
+// running on this machine (Claude Code, Codex and Gemini, each via its CLI) to
+// the ChatPanel Chrome extension. Zero runtime dependencies.
 //
-//   GET  /health  → { ok, version, agents: [{id,label,available,reason}] }
+//   GET  /health  → { ok, version, agents: [...], update: {current,latest,…} }
+//   POST /update  → self-update to the latest release (compiled binary installs)
 //   POST /chat    → Server-Sent Events stream of { type, ... }:
 //                     {type:'delta', text}    incremental assistant text
 //                     {type:'tool',  name, summary}
@@ -19,10 +19,11 @@ import os from 'node:os';
 import * as claude from './engines/claude.js';
 import * as codex from './engines/codex.js';
 import * as gemini from './engines/gemini.js';
-import { installService, uninstallService, serviceStatus } from './service.js';
+import { installService, uninstallService, serviceStatus, restartService } from './service.js';
 import { enrichPath, findAgentBin } from './env.js';
+import { checkForUpdate, selfUpdate } from './update.js';
 
-const VERSION = '0.2.12';
+const VERSION = '0.2.13';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -81,7 +82,20 @@ async function handleHealth(res) {
       return { id, label, available: a.ok, reason: a.reason };
     }),
   );
-  json(res, 200, { ok: true, version: VERSION, agents });
+  const update = await checkForUpdate(VERSION).catch(() => ({ current: VERSION, updateAvailable: false }));
+  json(res, 200, { ok: true, version: VERSION, agents, update });
+}
+
+// POST /update — self-update (compiled-binary installs). Swaps the binary, replies,
+// then restarts the service into the new version. npm installs get instructions.
+async function handleUpdate(res) {
+  try {
+    const result = await selfUpdate(VERSION); // throws on npm install / no update / failure
+    json(res, 200, { ok: true, updated: true, from: result.from, to: result.to });
+    res.on('finish', () => setTimeout(() => restartService(), 400));
+  } catch (e) {
+    json(res, 400, { ok: false, error: String(e?.message || e) });
+  }
 }
 
 async function handleChat(req, res) {
@@ -187,6 +201,7 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/chat') return handleChat(req, res);
     if (req.method === 'POST' && url.pathname === '/complete') return handleComplete(req, res);
+    if (req.method === 'POST' && url.pathname === '/update') return handleUpdate(res);
     json(res, 404, { error: 'Not found' });
   } catch (e) {
     json(res, 500, { error: e?.message || String(e) });
@@ -218,6 +233,7 @@ Usage:
   chatpanel-bridge --install    run automatically at login, in the background
   chatpanel-bridge --uninstall  remove the login auto-start
   chatpanel-bridge --status     show whether auto-start is set up
+  chatpanel-bridge --update     download & install the latest version, then restart
   chatpanel-bridge --version    print the version
 
 Env: CHATPANEL_BRIDGE_HOST, CHATPANEL_BRIDGE_PORT`);
@@ -269,4 +285,17 @@ function runCli() {
   return false;
 }
 
-if (!runCli()) startServer();
+if (process.argv.includes('--update')) {
+  (async () => {
+    try {
+      const r = await selfUpdate(VERSION);
+      log('info', `Updated v${r.from} → v${r.to}. Restarting the background service…`);
+      restartService();
+    } catch (e) {
+      log('error', 'Update failed: ' + (e?.message || e));
+      process.exitCode = 1;
+    }
+  })();
+} else if (!runCli()) {
+  startServer();
+}

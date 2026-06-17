@@ -12,7 +12,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 
 const LABEL = 'net.chatpanel.bridge';
 const DISPLAY = 'ChatPanel Bridge';
@@ -156,4 +156,38 @@ export function uninstallService() {
 }
 export function serviceStatus() {
   return byPlatform(macStatus, winStatus, linStatus);
+}
+
+// Restart the installed service into a freshly-swapped binary (used by self-
+// update). Detached so it survives the restart killing the caller — works whether
+// invoked from inside the service (POST /update) or a CLI `--update`.
+//   • macOS  — `launchctl kickstart -k` kills + relaunches the LaunchAgent.
+//   • Linux  — `systemctl --user restart`.
+//   • Windows — kill the running bridge, wait ~2s (port frees), relaunch via the
+//               hidden VBS, then delete the renamed old-*.exe.
+export function restartService() {
+  try {
+    if (process.platform === 'darwin') {
+      const uid = typeof process.getuid === 'function' ? process.getuid() : 0;
+      spawn('launchctl', ['kickstart', '-k', `gui/${uid}/${LABEL}`], { detached: true, stdio: 'ignore' }).unref();
+      return true;
+    }
+    if (process.platform === 'linux') {
+      spawn('systemctl', ['--user', 'restart', 'chatpanel-bridge'], { detached: true, stdio: 'ignore' }).unref();
+      return true;
+    }
+    if (process.platform === 'win32') {
+      const vbs = winVbs();
+      const dir = path.dirname(process.execPath);
+      const cmd =
+        `taskkill /IM chatpanel-bridge.exe /F >nul 2>&1 & ` +
+        `timeout /t 2 >nul & wscript.exe "${vbs}" & ` +
+        `del /q "${path.join(dir, 'chatpanel-bridge.old-*.exe')}" >nul 2>&1`;
+      spawn('cmd', ['/c', cmd], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+      return true;
+    }
+  } catch {
+    /* fall through */
+  }
+  return false;
 }
