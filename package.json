@@ -1,8 +1,8 @@
 {
   "name": "@chatpanel/bridge",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "type": "module",
-  "description": "Local bridge that exposes the AI coding agents installed on your machine — Claude Code (Agent SDK), Codex (CLI), and Gemini CLI — to the ChatPanel Chrome extension over a localhost SSE endpoint. Bring your own agent.",
+  "description": "Local bridge that exposes the AI coding agents installed on your machine — Claude Code (CLI), Codex (CLI), and Gemini CLI — to the ChatPanel Chrome extension over a localhost SSE endpoint. Bring your own agent.",
   "keywords": [
     "chatpanel",
     "claude-code",
@@ -36,9 +36,7 @@
     "dev": "node --watch src/server.js",
     "build:bin": "bash scripts/build-binaries.sh"
   },
-  "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.1.0"
-  },
+  "dependencies": {},
   "publishConfig": {
     "registry": "https://registry.npmjs.org/",
     "access": "public"
