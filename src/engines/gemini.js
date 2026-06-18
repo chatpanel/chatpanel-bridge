@@ -20,6 +20,13 @@ import { findAgentBin } from '../env.js';
 const IDLE_MS = Number(process.env.CHATPANEL_GEMINI_TIMEOUT_MS) || 180_000;
 const SCRATCH = path.join(os.tmpdir(), 'chatpanel-gemini-scratch');
 
+// Gemini CLI has no "list models" command (--help only lists extensions/sessions)
+// and stores no model in settings.json, so offer the common current ids. Free
+// text still accepted.
+export async function listModels() {
+  return ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+}
+
 let installed = false;
 let lastProbe = 0;
 export async function available() {

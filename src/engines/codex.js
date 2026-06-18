@@ -16,7 +16,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { readFile, unlink } from 'node:fs/promises';
-import { existsSync, mkdirSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, symlinkSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin } from '../env.js';
@@ -28,6 +28,22 @@ const IDLE_MS = Number(process.env.CHATPANEL_CODEX_TIMEOUT_MS) || 180_000;
 const REASONING = process.env.CHATPANEL_CODEX_EFFORT ?? 'low'; // '' → respect config
 
 const SCRATCH = path.join(os.tmpdir(), 'chatpanel-codex-scratch');
+
+// Codex has no "list models" command — its model lives in CODEX_HOME/config.toml
+// (e.g. `model = "gpt-5.5"`). Surface the user's REAL configured model(s), read
+// straight from that file, plus a few common ids. The picker still accepts any
+// free-text value, so an out-of-date curated entry is harmless.
+const CODEX_KNOWN = ['gpt-5-codex', 'gpt-5', 'o3', 'o4-mini'];
+export async function listModels() {
+  const set = new Set();
+  try {
+    const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+    const cfg = readFileSync(path.join(home, 'config.toml'), 'utf8');
+    for (const m of cfg.matchAll(/(?:^|\n)\s*model\s*=\s*["']([^"'\n]+)["']/g)) set.add(m[1].trim());
+  } catch { /* no config — fall back to the curated set */ }
+  for (const m of CODEX_KNOWN) set.add(m);
+  return [...set];
+}
 const ISO_HOME = path.join(os.homedir(), '.chatpanel', 'codex-home');
 
 function ensureScratch() {
