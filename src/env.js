@@ -8,7 +8,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { readdirSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, existsSync } from 'node:fs';
 
 let enriched = false;
 
@@ -81,16 +81,22 @@ function shellWhich(name) {
 // native binary the old code spawned, so behavior there is unchanged.
 //
 // Returns one of:
-//   { kind: 'native', bin, shell }   → spawn(bin, args, { shell })
+//   { kind: 'native', bin }          → spawn(bin, args)          (directly exec'able)
 //   { kind: 'script', script }       → spawn(process.execPath, [script, ...args])
+//   { kind: 'cmd', bin }             → spawn('cmd.exe', ['/c', bin, ...args])
 //   { kind: 'wsl' }                  → spawn('wsl.exe', [wsl prefix, ...args])
 //   null                             → not found (caller may fall back to SDK)
+//
+// We never use spawn's `shell: true` — with an args array it concatenates rather
+// than escapes (Node DEP0190 / a real injection surface). The 'script' and 'cmd'
+// kinds run the shim safely with a proper argv instead.
 export function resolveClaude() {
   const override = process.env.CHATPANEL_CLAUDE_PATH;
   if (override) {
     const ext = path.extname(override).toLowerCase();
-    if (!isCompiledBinary() && /\.(c?js|mjs)$/.test(ext)) return { kind: 'script', script: override };
-    return { kind: 'native', bin: override, shell: process.platform === 'win32' && (ext === '.cmd' || ext === '.bat') };
+    if (!isCompiledBinary() && /^\.(c?js|mjs)$/.test(ext)) return { kind: 'script', script: override };
+    if (process.platform === 'win32' && (ext === '.cmd' || ext === '.bat')) return { kind: 'cmd', bin: override };
+    return { kind: 'native', bin: override };
   }
 
   if (process.platform === 'win32') {
@@ -102,12 +108,12 @@ export function resolveClaude() {
 
   // macOS / Linux / WSL-native: same resolution the engine used before.
   const bin = findAgentBin('claude');
-  return bin ? { kind: 'native', bin, shell: false } : null;
+  return bin ? { kind: 'native', bin } : null;
 }
 
 // Locate a runnable Claude Code on Windows. Prefer the package's cli.js (run
 // with our own Node/Bun — clean arg passing, no cmd.exe quoting), then a real
-// .exe, then a .cmd shim via the shell as a last resort.
+// .exe, then a .cmd/.bat shim launched safely via cmd.exe.
 function findClaudeWindows() {
   const dirs = (process.env.PATH || '').split(path.delimiter);
   for (const d of dirs) {
@@ -119,17 +125,18 @@ function findClaudeWindows() {
     // Running cli.js with our own interpreter only works under a real Node/Bun,
     // not inside a compiled single-file binary (which is not a JS interpreter).
     if (!isCompiledBinary()) {
-      const js = claudeCliJs(d);
+      const js = claudeCliJs(d) || shimTarget(d);
       if (js) return { kind: 'script', script: js };
     }
-    if (existsSync(path.join(d, 'claude.exe'))) return { kind: 'native', bin: path.join(d, 'claude.exe'), shell: false };
-    if (existsSync(path.join(d, 'claude.cmd'))) return { kind: 'native', bin: path.join(d, 'claude.cmd'), shell: true };
-    if (existsSync(path.join(d, 'claude.bat'))) return { kind: 'native', bin: path.join(d, 'claude.bat'), shell: true };
+    if (existsSync(path.join(d, 'claude.exe'))) return { kind: 'native', bin: path.join(d, 'claude.exe') };
+    if (existsSync(path.join(d, 'claude.cmd'))) return { kind: 'cmd', bin: path.join(d, 'claude.cmd') };
+    if (existsSync(path.join(d, 'claude.bat'))) return { kind: 'cmd', bin: path.join(d, 'claude.bat') };
   }
   return null;
 }
 
-// The npm shim sits next to (or one level up from) the claude-code package.
+// The npm shim usually sits next to (or one level up from) the claude-code
+// package — quick static guesses before parsing the shim itself.
 function claudeCliJs(dir) {
   const rels = [
     ['node_modules', '@anthropic-ai', 'claude-code', 'cli.js'],
@@ -139,6 +146,27 @@ function claudeCliJs(dir) {
   for (const r of rels) {
     const c = path.join(dir, ...r);
     if (existsSync(c)) return c;
+  }
+  return null;
+}
+
+// Robust fallback: every npm/pnpm/yarn/volta shim literally names the JS entry it
+// runs, relative to the shim dir (`%dp0%\…\cli.js` in .cmd, `$basedir/…/cli.js`
+// in the sh/.ps1 shims). Extract that so any install layout resolves to a real
+// cli.js we can run with our own interpreter.
+function shimTarget(dir) {
+  for (const shim of ['claude.cmd', 'claude', 'claude.ps1']) {
+    let txt;
+    try {
+      txt = readFileSync(path.join(dir, shim), 'utf8');
+    } catch {
+      continue;
+    }
+    const m = txt.match(/(?:%~?dp0%|\$basedir|\$\{basedir\})[\\/]+([^"'\s]+\.[cm]?js)/i);
+    if (m) {
+      const abs = path.join(dir, m[1].replace(/[\\/]+/g, path.sep));
+      if (existsSync(abs)) return abs;
+    }
   }
   return null;
 }

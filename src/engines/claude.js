@@ -88,9 +88,14 @@ function buildSpawn(spec, args, cwd) {
     // Run cli.js with the interpreter already running the bridge (node/bun).
     return [process.execPath, [spec.script, ...args], opts];
   }
-  // kind === 'native' — direct executable (.exe / mac+linux binary), or a .cmd
-  // shim via the shell on Windows.
-  return [spec.bin, args, { ...opts, shell: !!spec.shell }];
+  if (spec.kind === 'cmd') {
+    // Launch the .cmd/.bat shim via cmd.exe with a real argv (shell:false). Node
+    // applies cmd.exe-aware quoting here, so args are passed safely — unlike
+    // spawn(..., { shell: true }), which concatenates (DEP0190).
+    return ['cmd.exe', ['/d', '/s', '/c', spec.bin, ...args], opts];
+  }
+  // kind === 'native' — a directly executable file (mac/linux binary or .exe).
+  return [spec.bin, args, opts];
 }
 
 // Spawn claude (however it resolves) and stream its stream-json output via
