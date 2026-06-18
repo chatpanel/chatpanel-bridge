@@ -28,6 +28,16 @@ jobs:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
+      - name: Version constant must match package.json
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          SRC=$(node -e "console.log((require('fs').readFileSync('src/server.js','utf8').match(/VERSION = '([^']+)'/)||[])[1]||'')")
+          echo "package.json=$PKG  server.js=$SRC"
+          if [ "$PKG" != "$SRC" ]; then
+            echo "::error::VERSION in src/server.js ($SRC) != package.json ($PKG). Bump both."
+            exit 1
+          fi
+
       - name: Ensure npm supports trusted publishing (>= 11.5.1)
         run: npm install -g npm@latest
 
