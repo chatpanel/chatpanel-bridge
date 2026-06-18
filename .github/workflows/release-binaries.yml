@@ -39,17 +39,21 @@ jobs:
         with:
           node-version: 20
 
-      # npm is reliable on the runners; installs the platform-correct native deps.
-      - run: npm ci || npm install
+      # Lean binary: skip the optional Claude Agent SDK (and its native `sharp`).
+      # The SDK fallback is disabled inside compiled binaries anyway — they drive
+      # the native `claude` CLI — so bundling it is pure bloat.
+      - run: npm ci --omit=optional || npm install --omit=optional
 
       - uses: oven-sh/setup-bun@v2
 
-      # Native build (no --target): bundles this platform's native addons.
+      # Native build (no --target): bundles this platform's native addons. The
+      # SDK is marked external so the dynamic import() doesn't pull it into the
+      # bundle; at runtime in the binary it resolves to null (fallback off).
       - name: Build ${{ matrix.out }}
         shell: bash
         run: |
           mkdir -p dist
-          bun build src/server.js --compile --outfile "dist/${{ matrix.out }}"
+          bun build src/server.js --compile --external @anthropic-ai/claude-agent-sdk --outfile "dist/${{ matrix.out }}"
 
       # Ad-hoc sign so macOS reports "unidentified developer" (with Open Anyway)
       # instead of "damaged". Real notarization needs an Apple Developer ID.

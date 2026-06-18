@@ -15,7 +15,9 @@ targets=(
 for t in "${targets[@]}"; do
   target="${t%%:*}"; out="${t##*:}"
   echo "→ building dist/$out ($target)"
-  bun build src/server.js --compile --target="$target" --outfile "dist/$out"
+  # --external: the optional Claude Agent SDK fallback is off in compiled
+  # binaries, so don't bundle it (or its native `sharp`).
+  bun build src/server.js --compile --target="$target" --external @anthropic-ai/claude-agent-sdk --outfile "dist/$out"
 done
 echo "✓ binaries in dist/"
 ls -la dist
