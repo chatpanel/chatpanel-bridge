@@ -12,8 +12,9 @@ import { readdirSync, existsSync } from 'node:fs';
 
 let enriched = false;
 
-// The agent CLIs the bridge shells out to (Claude is the in-process SDK).
-const AGENT_CLIS = ['codex', 'gemini'];
+// The agent CLIs the bridge shells out to. Claude has its own richer resolution
+// (resolveClaude: native / cli.js / WSL / SDK) below.
+const AGENT_CLIS = ['codex', 'gemini', 'claude'];
 
 // Is `name` executable somewhere on the current PATH?
 function onPath(name) {
@@ -62,6 +63,125 @@ function shellWhich(name) {
   } catch {
     return '';
   }
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code launcher resolution.
+//
+// The Codex/Gemini engines can assume `spawn('codex', …)` runs a directly
+// executable file on the current OS's PATH. Claude needs more care:
+//   • On Windows, npm installs `claude.cmd` / `claude.ps1` / an extensionless
+//     bash shim — NONE of which Node's spawn() can execute directly (that's the
+//     "spawn C:\… ENOENT"). The runnable thing is the package's `cli.js`, which
+//     we run with our own Node/Bun.
+//   • A very common setup is "Windows host, `claude` only installed inside WSL."
+//     A Windows process can't see WSL's filesystem or PATH, so we cross the
+//     boundary explicitly via `wsl.exe`.
+// On macOS/Linux (and WSL-native Node) none of this applies: we return the same
+// native binary the old code spawned, so behavior there is unchanged.
+//
+// Returns one of:
+//   { kind: 'native', bin, shell }   → spawn(bin, args, { shell })
+//   { kind: 'script', script }       → spawn(process.execPath, [script, ...args])
+//   { kind: 'wsl' }                  → spawn('wsl.exe', [wsl prefix, ...args])
+//   null                             → not found (caller may fall back to SDK)
+export function resolveClaude() {
+  const override = process.env.CHATPANEL_CLAUDE_PATH;
+  if (override) {
+    const ext = path.extname(override).toLowerCase();
+    if (!isCompiledBinary() && /\.(c?js|mjs)$/.test(ext)) return { kind: 'script', script: override };
+    return { kind: 'native', bin: override, shell: process.platform === 'win32' && (ext === '.cmd' || ext === '.bat') };
+  }
+
+  if (process.platform === 'win32') {
+    const win = findClaudeWindows();
+    if (win) return win;
+    if (claudeInWsl()) return { kind: 'wsl' };
+    return null;
+  }
+
+  // macOS / Linux / WSL-native: same resolution the engine used before.
+  const bin = findAgentBin('claude');
+  return bin ? { kind: 'native', bin, shell: false } : null;
+}
+
+// Locate a runnable Claude Code on Windows. Prefer the package's cli.js (run
+// with our own Node/Bun — clean arg passing, no cmd.exe quoting), then a real
+// .exe, then a .cmd shim via the shell as a last resort.
+function findClaudeWindows() {
+  const dirs = (process.env.PATH || '').split(path.delimiter);
+  for (const d of dirs) {
+    if (!d) continue;
+    const hasShim = ['claude', 'claude.cmd', 'claude.exe', 'claude.ps1', 'claude.bat'].some((n) =>
+      existsSync(path.join(d, n)),
+    );
+    if (!hasShim) continue;
+    // Running cli.js with our own interpreter only works under a real Node/Bun,
+    // not inside a compiled single-file binary (which is not a JS interpreter).
+    if (!isCompiledBinary()) {
+      const js = claudeCliJs(d);
+      if (js) return { kind: 'script', script: js };
+    }
+    if (existsSync(path.join(d, 'claude.exe'))) return { kind: 'native', bin: path.join(d, 'claude.exe'), shell: false };
+    if (existsSync(path.join(d, 'claude.cmd'))) return { kind: 'native', bin: path.join(d, 'claude.cmd'), shell: true };
+    if (existsSync(path.join(d, 'claude.bat'))) return { kind: 'native', bin: path.join(d, 'claude.bat'), shell: true };
+  }
+  return null;
+}
+
+// The npm shim sits next to (or one level up from) the claude-code package.
+function claudeCliJs(dir) {
+  const rels = [
+    ['node_modules', '@anthropic-ai', 'claude-code', 'cli.js'],
+    ['..', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'],
+    ['..', 'lib', 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js'],
+  ];
+  for (const r of rels) {
+    const c = path.join(dir, ...r);
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
+
+// Is `claude` reachable inside the default WSL distro's login shell? Cached;
+// re-probed (throttled) while not found so it self-heals once WSL/claude appear.
+let wslClaude = null;
+let wslProbe = 0;
+function claudeInWsl() {
+  if (wslClaude === null || (!wslClaude && Date.now() - wslProbe > 4000)) {
+    wslProbe = Date.now();
+    try {
+      const r = spawnSync('wsl.exe', ['-e', 'bash', '-lic', 'command -v claude'], {
+        encoding: 'utf8',
+        timeout: 8000,
+        windowsHide: true,
+      });
+      wslClaude = r.status === 0 && /\S/.test(stripBom(r.stdout || ''));
+    } catch {
+      wslClaude = false;
+    }
+  }
+  return wslClaude;
+}
+
+// Translate a Windows path to its WSL (/mnt/c/…) equivalent. Returns null on
+// failure so the caller can just run in WSL's home instead.
+export function toWslPath(winPath) {
+  try {
+    const r = spawnSync('wsl.exe', ['-e', 'wslpath', '-a', winPath], {
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+    });
+    const out = stripBom(r.stdout || '').trim();
+    return out.startsWith('/') ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+function stripBom(s) {
+  return s.replace(/^﻿/, '').trim();
 }
 
 // Version managers install CLIs under versioned bin dirs that a lazy-loaded
