@@ -27,7 +27,7 @@ import { checkForUpdate, selfUpdate } from './update.js';
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.3.1';
+const VERSION = '0.3.2';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -191,6 +191,28 @@ async function handleComplete(req, res) {
   }
 }
 
+// POST /list-models → { agent, options } → { models } — the unified model-list
+// interface. Each engine decides HOW to enumerate (claude → known aliases; custom
+// → runs the agent's configured `listModelsArgs`, e.g. pi `--list-models` /
+// opencode `models`, and parses stdout). Engines without a lister return [].
+async function handleListModels(req, res) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return json(res, 400, { error: 'Bad JSON: ' + e.message });
+  }
+  const target = ENGINES[body.agent];
+  if (!target) return json(res, 404, { error: `Unknown agent "${body.agent}"` });
+  if (typeof target.engine.listModels !== 'function') return json(res, 200, { models: [] });
+  try {
+    const models = await target.engine.listModels(body.options || {});
+    return json(res, 200, { models: Array.isArray(models) ? models : [] });
+  } catch (e) {
+    return json(res, 502, { error: e?.message || String(e) });
+  }
+}
+
 // POST /agent-check → { command } → { ok, via } — does this command resolve on
 // this machine? Powers the "✓ found" indicator when onboarding a custom agent.
 // `via` tells the user HOW it resolved (native / script / cmd / wsl) so a Windows
@@ -233,6 +255,7 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/chat') return handleChat(req, res);
     if (req.method === 'POST' && url.pathname === '/complete') return handleComplete(req, res);
+    if (req.method === 'POST' && url.pathname === '/list-models') return handleListModels(req, res);
     if (req.method === 'POST' && url.pathname === '/agent-check') return handleAgentCheck(req, res);
     if (req.method === 'POST' && url.pathname === '/update') return handleUpdate(res);
     json(res, 404, { error: 'Not found' });

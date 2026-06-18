@@ -55,6 +55,13 @@ export async function available() {
   return cachedOk ? { ok: true } : { ok: false, reason: lastReason };
 }
 
+// Claude Code has no "list models" command — it takes stable aliases (or full
+// ids). Return the common aliases so the picker has sensible options; the user
+// can still type any model string (e.g. claude-opus-4-8).
+export async function listModels() {
+  return ['opus', 'sonnet', 'haiku'];
+}
+
 // The bridge is stateless, so we replay the conversation as a single prompt.
 function buildPrompt(messages) {
   const history = messages.slice(0, -1);

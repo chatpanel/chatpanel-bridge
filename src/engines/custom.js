@@ -32,6 +32,52 @@ export async function available() {
   return { ok: true };
 }
 
+// Parse a CLI's "list models" stdout into model ids. Tools format this very
+// differently (one-per-line, a table, "provider/model", …), so this is
+// best-effort: take the first token of each line that looks like an id and skip
+// obvious headers/prose. The picker always allows a custom value as a fallback.
+function parseModelList(stdout) {
+  const out = [];
+  const seen = new Set();
+  for (const raw of String(stdout || '').split('\n')) {
+    const tok = raw.trim().split(/\s+/)[0] || '';
+    if (!/^[A-Za-z0-9][\w./:-]{1,79}$/.test(tok)) continue;
+    if (/^(name|model|models|id|provider|available|usage|options|commands)$/i.test(tok)) continue;
+    if (seen.has(tok)) continue;
+    seen.add(tok);
+    out.push(tok);
+    if (out.length >= 200) break;
+  }
+  return out;
+}
+
+// Unified model listing: run the agent's CONFIGURED list-models invocation
+// (e.g. pi `--list-models`, opencode `models`) and parse the output. Returns []
+// when not configured. Pro-gated like chat (it runs the user's CLI).
+export async function listModels(options = {}) {
+  if (!(await isProEntitled(options.entitlement))) {
+    throw new Error('Custom agents require ChatPanel Pro.');
+  }
+  const spec = options.custom || {};
+  const listArgs = String(spec.listModelsArgs || '').trim();
+  if (!spec.command || !listArgs) return [];
+  const resolved = resolveCommand(spec.command);
+  if (!resolved) throw new Error(`Couldn't find "${spec.command}".`);
+  const cwd = options.workingDir ? path.resolve(options.workingDir) : null;
+  const [bin, argv, opts] = buildSpawnSpec(resolved, listArgs.split(/\s+/).filter(Boolean), cwd);
+  const stdout = await new Promise((resolve, reject) => {
+    let child;
+    try { child = spawn(bin, argv, opts); } catch (e) { return reject(new Error(`Failed to start ${spec.command}: ${e.message}`)); }
+    let out = '';
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('Listing models timed out.')); }, 20000);
+    child.stdout.on('data', (d) => (out += d.toString()));
+    child.on('error', (e) => { clearTimeout(timer); reject(new Error(`Failed to start ${spec.command}: ${e.message}`)); });
+    child.on('close', () => { clearTimeout(timer); resolve(out); });
+    try { child.stdin.end(); } catch { /* some CLIs don't read stdin */ }
+  });
+  return parseModelList(stdout);
+}
+
 // The bridge is stateless, so replay the conversation as a single prompt.
 function buildPrompt(messages, system) {
   let p = system ? `${system}\n\n` : '';
@@ -74,6 +120,17 @@ export async function chat({ messages, system, options }, emit) {
     : spec.args
       ? String(spec.args).split(/\s+/).filter(Boolean)
       : [];
+  // Inject the selected model via the agent's CONFIGURED model-arg template
+  // (e.g. "--model {model}" or, for opencode, "-m {model}" with provider/model).
+  // Without a template we can't know how this CLI takes a model, so options.model
+  // is ignored — preserving back-compat with agents that bake the model into args.
+  if (options.model && spec.modelArg) {
+    const tmpl = String(spec.modelArg);
+    const injected = tmpl.includes('{model}')
+      ? tmpl.replaceAll('{model}', options.model).split(/\s+/).filter(Boolean)
+      : [...tmpl.split(/\s+/).filter(Boolean), options.model];
+    args = [...injected, ...args];
+  }
   if (promptVia === 'arg') {
     let placed = false;
     args = args.map((a) => {
