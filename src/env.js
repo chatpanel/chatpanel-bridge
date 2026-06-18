@@ -91,52 +91,74 @@ function shellWhich(name) {
 // than escapes (Node DEP0190 / a real injection surface). The 'script' and 'cmd'
 // kinds run the shim safely with a proper argv instead.
 export function resolveClaude() {
-  const override = process.env.CHATPANEL_CLAUDE_PATH;
-  if (override) {
-    const ext = path.extname(override).toLowerCase();
-    if (!isCompiledBinary() && /^\.(c?js|mjs)$/.test(ext)) return { kind: 'script', script: override };
-    if (process.platform === 'win32' && (ext === '.cmd' || ext === '.bat')) return { kind: 'cmd', bin: override };
-    return { kind: 'native', bin: override };
+  if (process.env.CHATPANEL_CLAUDE_PATH) return resolveCommand(process.env.CHATPANEL_CLAUDE_PATH);
+  // The Claude npm package additionally ships a cli.js we prefer; otherwise this
+  // is the same generic resolution every command uses.
+  return resolveCommand('claude');
+}
+
+// Resolve ANY command (a bare name like `opencode`, or an absolute/relative path)
+// to a launch spec, the same way resolveClaude does — so custom user-onboarded
+// agents get identical cross-platform launching (PATH, Windows cli.js/.cmd, WSL).
+//
+// Returns one of:
+//   { kind: 'native', bin }              → spawn(bin, args)
+//   { kind: 'script', script }           → spawn(process.execPath, [script, ...args])
+//   { kind: 'cmd', bin }                 → spawn('cmd.exe', ['/c', bin, ...args])
+//   { kind: 'wsl', command }             → spawn('wsl.exe', [prefix, command, ...args])
+//   null                                 → not found
+//
+// We never use spawn's `shell: true` — with an args array it concatenates rather
+// than escapes (Node DEP0190 / a real injection surface). The 'script'/'cmd'/'wsl'
+// kinds run things safely with a proper argv instead.
+export function resolveCommand(command) {
+  if (!command) return null;
+  const looksLikePath = command.includes('/') || command.includes('\\') || /\.[a-z0-9]+$/i.test(command);
+
+  if (looksLikePath) {
+    if (!existsSync(command)) return null; // an explicit path: don't PATH-search
+    const ext = path.extname(command).toLowerCase();
+    if (!isCompiledBinary() && /^\.(c?js|mjs)$/.test(ext)) return { kind: 'script', script: command };
+    if (process.platform === 'win32' && (ext === '.cmd' || ext === '.bat')) return { kind: 'cmd', bin: command };
+    return { kind: 'native', bin: command };
   }
 
   if (process.platform === 'win32') {
-    const win = findClaudeWindows();
+    const win = findCommandWindows(command);
     if (win) return win;
-    if (claudeInWsl()) return { kind: 'wsl' };
+    // Common: tool only installed inside WSL. Only probe safe, simple names.
+    if (/^[\w.-]+$/.test(command) && commandInWsl(command)) return { kind: 'wsl', command };
     return null;
   }
 
-  // macOS / Linux / WSL-native: same resolution the engine used before.
-  const bin = findAgentBin('claude');
+  const bin = findAgentBin(command);
   return bin ? { kind: 'native', bin } : null;
 }
 
-// Locate a runnable Claude Code on Windows. Prefer the package's cli.js (run
-// with our own Node/Bun — clean arg passing, no cmd.exe quoting), then a real
-// .exe, then a .cmd/.bat shim launched safely via cmd.exe.
-function findClaudeWindows() {
+// Locate a runnable command on Windows. Prefer a runnable JS entry (run with our
+// own Node/Bun — clean arg passing, no cmd.exe quoting), then a real .exe, then a
+// .cmd/.bat shim launched safely via cmd.exe.
+function findCommandWindows(name) {
   const dirs = (process.env.PATH || '').split(path.delimiter);
   for (const d of dirs) {
     if (!d) continue;
-    const hasShim = ['claude', 'claude.cmd', 'claude.exe', 'claude.ps1', 'claude.bat'].some((n) =>
-      existsSync(path.join(d, n)),
-    );
-    if (!hasShim) continue;
+    const exts = ['', '.cmd', '.exe', '.ps1', '.bat'];
+    if (!exts.some((e) => existsSync(path.join(d, name + e)))) continue;
     // Running cli.js with our own interpreter only works under a real Node/Bun,
     // not inside a compiled single-file binary (which is not a JS interpreter).
     if (!isCompiledBinary()) {
-      const js = claudeCliJs(d) || shimTarget(d);
+      const js = (name === 'claude' && claudeCliJs(d)) || shimTarget(d, name);
       if (js) return { kind: 'script', script: js };
     }
-    if (existsSync(path.join(d, 'claude.exe'))) return { kind: 'native', bin: path.join(d, 'claude.exe') };
-    if (existsSync(path.join(d, 'claude.cmd'))) return { kind: 'cmd', bin: path.join(d, 'claude.cmd') };
-    if (existsSync(path.join(d, 'claude.bat'))) return { kind: 'cmd', bin: path.join(d, 'claude.bat') };
+    if (existsSync(path.join(d, name + '.exe'))) return { kind: 'native', bin: path.join(d, name + '.exe') };
+    if (existsSync(path.join(d, name + '.cmd'))) return { kind: 'cmd', bin: path.join(d, name + '.cmd') };
+    if (existsSync(path.join(d, name + '.bat'))) return { kind: 'cmd', bin: path.join(d, name + '.bat') };
   }
   return null;
 }
 
-// The npm shim usually sits next to (or one level up from) the claude-code
-// package — quick static guesses before parsing the shim itself.
+// The Claude npm package additionally ships a cli.js we prefer (static guesses
+// before parsing the shim).
 function claudeCliJs(dir) {
   const rels = [
     ['node_modules', '@anthropic-ai', 'claude-code', 'cli.js'],
@@ -150,12 +172,12 @@ function claudeCliJs(dir) {
   return null;
 }
 
-// Robust fallback: every npm/pnpm/yarn/volta shim literally names the JS entry it
-// runs, relative to the shim dir (`%dp0%\…\cli.js` in .cmd, `$basedir/…/cli.js`
-// in the sh/.ps1 shims). Extract that so any install layout resolves to a real
-// cli.js we can run with our own interpreter.
-function shimTarget(dir) {
-  for (const shim of ['claude.cmd', 'claude', 'claude.ps1']) {
+// Robust, general fallback: every npm/pnpm/yarn/volta shim literally names the JS
+// entry it runs, relative to the shim dir (`%dp0%\…\cli.js` in .cmd,
+// `$basedir/…/cli.js` in the sh/.ps1 shims). Extract that so any install layout
+// resolves to a real JS entry we can run with our own interpreter.
+function shimTarget(dir, name) {
+  for (const shim of [`${name}.cmd`, name, `${name}.ps1`]) {
     let txt;
     try {
       txt = readFileSync(path.join(dir, shim), 'utf8');
@@ -171,25 +193,46 @@ function shimTarget(dir) {
   return null;
 }
 
-// Is `claude` reachable inside the default WSL distro's login shell? Cached;
-// re-probed (throttled) while not found so it self-heals once WSL/claude appear.
-let wslClaude = null;
-let wslProbe = 0;
-function claudeInWsl() {
-  if (wslClaude === null || (!wslClaude && Date.now() - wslProbe > 4000)) {
-    wslProbe = Date.now();
-    try {
-      const r = spawnSync('wsl.exe', ['-e', 'bash', '-lic', 'command -v claude'], {
-        encoding: 'utf8',
-        timeout: 8000,
-        windowsHide: true,
-      });
-      wslClaude = r.status === 0 && /\S/.test(stripBom(r.stdout || ''));
-    } catch {
-      wslClaude = false;
-    }
+// Is `name` reachable inside the default WSL distro's login shell? Cached per
+// name; re-probed (throttled) while not found so it self-heals once it appears.
+const wslSeen = new Map(); // name -> { ok, at }
+function commandInWsl(name) {
+  const c = wslSeen.get(name);
+  if (c && (c.ok || Date.now() - c.at < 4000)) return c.ok;
+  let ok = false;
+  try {
+    const r = spawnSync('wsl.exe', ['-e', 'bash', '-lic', `command -v ${name}`], {
+      encoding: 'utf8',
+      timeout: 8000,
+      windowsHide: true,
+    });
+    ok = r.status === 0 && /\S/.test(stripBom(r.stdout || ''));
+  } catch {
+    ok = false;
   }
-  return wslClaude;
+  wslSeen.set(name, { ok, at: Date.now() });
+  return ok;
+}
+
+// Turn a launch spec + CLI args into a concrete [bin, argv, opts] for spawn().
+// `cwd` is the resolved working dir (a Windows path on win32), or null for home.
+export function buildSpawnSpec(spec, args, cwd) {
+  if (spec.kind === 'wsl') {
+    // Run inside WSL's login shell so nvm/etc. PATH resolves the tool. The
+    // `exec <cmd> "$@"` + 'chatpanel' ($0) trick passes our args through as a
+    // proper argv array — no manual quoting, even for multi-line prompts.
+    const pre = [];
+    if (cwd) {
+      const wslCwd = toWslPath(cwd);
+      if (wslCwd) pre.push('--cd', wslCwd); // else: run in WSL home
+    }
+    const argv = [...pre, '-e', 'bash', '-lic', `exec ${spec.command} "$@"`, 'chatpanel', ...args];
+    return ['wsl.exe', argv, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env, windowsHide: true }];
+  }
+  const opts = { cwd: cwd || os.homedir(), stdio: ['pipe', 'pipe', 'pipe'], env: process.env, windowsHide: true };
+  if (spec.kind === 'script') return [process.execPath, [spec.script, ...args], opts];
+  if (spec.kind === 'cmd') return ['cmd.exe', ['/d', '/s', '/c', spec.bin, ...args], opts];
+  return [spec.bin, args, opts]; // native
 }
 
 // Translate a Windows path to its WSL (/mnt/c/…) equivalent. Returns null on

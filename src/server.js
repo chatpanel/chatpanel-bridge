@@ -19,14 +19,15 @@ import os from 'node:os';
 import * as claude from './engines/claude.js';
 import * as codex from './engines/codex.js';
 import * as gemini from './engines/gemini.js';
+import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
-import { enrichPath, findAgentBin } from './env.js';
+import { enrichPath, findAgentBin, resolveCommand } from './env.js';
 import { checkForUpdate, selfUpdate } from './update.js';
 
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.2.16';
+const VERSION = '0.3.0';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -34,6 +35,10 @@ const ENGINES = {
   claude: { engine: claude, label: 'Claude Code' },
   codex: { engine: codex, label: 'Codex' },
   gemini: { engine: gemini, label: 'Gemini CLI' },
+  // "Bring your own" — one engine drives any user-onboarded CLI (Pro). Hidden
+  // from /health (it's not a single installable agent; the extension manages the
+  // list and validates commands via /agent-check).
+  custom: { engine: custom, label: 'Custom', hidden: true },
 };
 
 // --------------------------------------------------------------------------
@@ -80,10 +85,12 @@ function readBody(req) {
 // --------------------------------------------------------------------------
 async function handleHealth(res) {
   const agents = await Promise.all(
-    Object.entries(ENGINES).map(async ([id, { engine, label }]) => {
-      const a = await engine.available().catch((e) => ({ ok: false, reason: String(e?.message || e) }));
-      return { id, label, available: a.ok, reason: a.reason };
-    }),
+    Object.entries(ENGINES)
+      .filter(([, e]) => !e.hidden)
+      .map(async ([id, { engine, label }]) => {
+        const a = await engine.available().catch((e) => ({ ok: false, reason: String(e?.message || e) }));
+        return { id, label, available: a.ok, reason: a.reason };
+      }),
   );
   const update = await checkForUpdate(VERSION).catch(() => ({ current: VERSION, updateAvailable: false }));
   json(res, 200, { ok: true, version: VERSION, agents, update });
@@ -184,6 +191,28 @@ async function handleComplete(req, res) {
   }
 }
 
+// POST /agent-check → { command } → { ok, via } — does this command resolve on
+// this machine? Powers the "✓ found" indicator when onboarding a custom agent.
+// `via` tells the user HOW it resolved (native / script / cmd / wsl) so a Windows
+// user sees e.g. "found in WSL". No execution, no entitlement needed (read-only).
+async function handleAgentCheck(req, res) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return json(res, 400, { error: 'Bad JSON: ' + e.message });
+  }
+  const command = String(body.command || '').trim();
+  if (!command) return json(res, 400, { error: 'No command' });
+  let spec = null;
+  try {
+    spec = resolveCommand(command);
+  } catch {
+    spec = null;
+  }
+  return json(res, 200, { ok: !!spec, via: spec ? spec.kind : null });
+}
+
 const server = createServer(async (req, res) => {
   cors(req, res);
   if (req.method === 'OPTIONS') {
@@ -204,6 +233,7 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/chat') return handleChat(req, res);
     if (req.method === 'POST' && url.pathname === '/complete') return handleComplete(req, res);
+    if (req.method === 'POST' && url.pathname === '/agent-check') return handleAgentCheck(req, res);
     if (req.method === 'POST' && url.pathname === '/update') return handleUpdate(res);
     json(res, 404, { error: 'Not found' });
   } catch (e) {
@@ -220,7 +250,8 @@ function startServer() {
   enrichPath(); // so codex/gemini are found even under a minimal service PATH
   server.listen(PORT, HOST, async () => {
     log('info', `listening on http://${HOST}:${PORT}`);
-    for (const [, { engine, label }] of Object.entries(ENGINES)) {
+    for (const [, { engine, label, hidden }] of Object.entries(ENGINES)) {
+      if (hidden) continue;
       const a = await engine.available().catch(() => ({ ok: false }));
       log('info', `  ${a.ok ? '✓' : '✕'} ${label}${a.ok ? '' : ' — ' + (a.reason || 'unavailable')}`);
     }

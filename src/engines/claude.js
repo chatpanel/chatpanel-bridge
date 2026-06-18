@@ -16,7 +16,7 @@
 import { spawn } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveClaude, toWslPath, isCompiledBinary } from '../env.js';
+import { resolveClaude, buildSpawnSpec, isCompiledBinary } from '../env.js';
 
 const TIMEOUT_MS = Number(process.env.CHATPANEL_CLAUDE_TIMEOUT_MS) || 180_000;
 // Read-only tools allowed without approval in headless mode; writes/shell are
@@ -65,46 +65,13 @@ function buildPrompt(messages) {
   return prompt;
 }
 
-// Turn a launch spec + the claude CLI args into a concrete [bin, argv, options]
-// for spawn(). `cwd` is the resolved working dir (Windows path on win32), or null
-// to use the home directory.
-function buildSpawn(spec, args, cwd) {
-  if (spec.kind === 'wsl') {
-    // Run claude inside WSL's login shell so nvm/etc. PATH resolves it. The
-    // `'exec claude "$@"'` + 'chatpanel' ($0) trick passes our args through as a
-    // proper argv array — no manual quoting, even for multi-line system prompts.
-    const pre = [];
-    if (cwd) {
-      const wslCwd = toWslPath(cwd);
-      if (wslCwd) pre.push('--cd', wslCwd); // else: run in WSL home
-    }
-    const argv = [...pre, '-e', 'bash', '-lic', 'exec claude "$@"', 'chatpanel', ...args];
-    return ['wsl.exe', argv, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env, windowsHide: true }];
-  }
-
-  const spawnCwd = cwd || os.homedir();
-  const opts = { cwd: spawnCwd, stdio: ['pipe', 'pipe', 'pipe'], env: process.env, windowsHide: true };
-  if (spec.kind === 'script') {
-    // Run cli.js with the interpreter already running the bridge (node/bun).
-    return [process.execPath, [spec.script, ...args], opts];
-  }
-  if (spec.kind === 'cmd') {
-    // Launch the .cmd/.bat shim via cmd.exe with a real argv (shell:false). Node
-    // applies cmd.exe-aware quoting here, so args are passed safely — unlike
-    // spawn(..., { shell: true }), which concatenates (DEP0190).
-    return ['cmd.exe', ['/d', '/s', '/c', spec.bin, ...args], opts];
-  }
-  // kind === 'native' — a directly executable file (mac/linux binary or .exe).
-  return [spec.bin, args, opts];
-}
-
 // Spawn claude (however it resolves) and stream its stream-json output via
 // `emit`. Resolves with { streamedAny, resultText } once it closes 0. Returns
 // null (no spawn) when claude can't be resolved, so the caller can fall back.
 function runClaude({ prompt, args, cwd, emit }) {
   const spec = resolveClaude();
   if (!spec) return null;
-  const [bin, argv, opts] = buildSpawn(spec, args, cwd);
+  const [bin, argv, opts] = buildSpawnSpec(spec, args, cwd);
 
   return new Promise((resolve, reject) => {
     let child;
@@ -159,8 +126,9 @@ function runClaude({ prompt, args, cwd, emit }) {
 }
 
 // Map one stream-json message to emit() calls. Returns { streamed, result }.
-// The CLI's stream-json mirrors the SDK message shapes.
-function handleMessage(msg, emit, alreadyStreamed) {
+// The CLI's stream-json mirrors the SDK message shapes. Exported so the custom
+// engine can reuse it for agents that emit Claude-style stream-json.
+export function handleMessage(msg, emit, alreadyStreamed) {
   const out = { streamed: false, result: null };
   if (msg.type === 'stream_event') {
     const ev = msg.event;
