@@ -18,7 +18,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { resolveClaude, buildSpawnSpec, isCompiledBinary } from '../env.js';
 
-const TIMEOUT_MS = Number(process.env.CHATPANEL_CLAUDE_TIMEOUT_MS) || 180_000;
+// Idle timeout: kill the run only after this long with NO output. The timer
+// re-arms on every stdout/stderr chunk, so a task that keeps streaming can run
+// indefinitely — only a truly stuck/silent process is killed. Override with
+// CHATPANEL_CLAUDE_TIMEOUT_MS (ms).
+const IDLE_MS = Number(process.env.CHATPANEL_CLAUDE_TIMEOUT_MS) || 180_000;
 // Read-only tools allowed without approval in headless mode; writes/shell are
 // gated behind the agent's permission mode.
 const READONLY_TOOLS = ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'TodoWrite', 'Task'];
@@ -86,12 +90,18 @@ function runClaude({ prompt, args, cwd, emit }) {
     let streamedAny = false;
     let resultText = '';
 
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`Claude Code timed out after ${Math.round(TIMEOUT_MS / 1000)}s.`));
-    }, TIMEOUT_MS);
+    let idleTimer;
+    const armIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error(`Claude Code timed out — no output for ${Math.round(IDLE_MS / 1000)}s.`));
+      }, IDLE_MS);
+    };
+    armIdle();
 
     child.stdout.on('data', (d) => {
+      armIdle();
       stdout += d.toString();
       let nl;
       while ((nl = stdout.indexOf('\n')) >= 0) {
@@ -109,13 +119,13 @@ function runClaude({ prompt, args, cwd, emit }) {
         if (r.result != null) resultText = r.result;
       }
     });
-    child.stderr.on('data', (d) => (stderr += d.toString()));
+    child.stderr.on('data', (d) => { armIdle(); stderr += d.toString(); });
     child.on('error', (e) => {
-      clearTimeout(timer);
+      clearTimeout(idleTimer);
       reject(new Error(`Failed to start claude (${bin}): ${e.message}`));
     });
     child.on('close', (code) => {
-      clearTimeout(timer);
+      clearTimeout(idleTimer);
       if (code === 0) resolve({ streamedAny, resultText });
       else reject(new Error(`Claude Code exited ${code}: ${stderr.trim().split('\n').pop() || 'failed'}`));
     });

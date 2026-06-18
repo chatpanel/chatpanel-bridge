@@ -21,7 +21,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin } from '../env.js';
 
-const TIMEOUT_MS = Number(process.env.CHATPANEL_CODEX_TIMEOUT_MS) || 180_000;
+// Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
+// streaming never trips it — only true silence does. Override with
+// CHATPANEL_CODEX_TIMEOUT_MS (ms).
+const IDLE_MS = Number(process.env.CHATPANEL_CODEX_TIMEOUT_MS) || 180_000;
 const REASONING = process.env.CHATPANEL_CODEX_EFFORT ?? 'low'; // '' → respect config
 
 const SCRATCH = path.join(os.tmpdir(), 'chatpanel-codex-scratch');
@@ -131,12 +134,18 @@ export async function chat({ messages, system, options }, emit) {
 
     let stdout = '';
     let stderr = '';
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`Codex timed out after ${Math.round(TIMEOUT_MS / 1000)}s.`));
-    }, TIMEOUT_MS);
+    let idleTimer;
+    const armIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error(`Codex timed out — no output for ${Math.round(IDLE_MS / 1000)}s.`));
+      }, IDLE_MS);
+    };
+    armIdle();
 
     child.stdout.on('data', (d) => {
+      armIdle();
       stdout += d.toString();
       let nl;
       while ((nl = stdout.indexOf('\n')) >= 0) {
@@ -150,13 +159,13 @@ export async function chat({ messages, system, options }, emit) {
         }
       }
     });
-    child.stderr.on('data', (d) => (stderr += d.toString()));
+    child.stderr.on('data', (d) => { armIdle(); stderr += d.toString(); });
     child.on('error', (e) => {
-      clearTimeout(timer);
+      clearTimeout(idleTimer);
       reject(e);
     });
     child.on('close', async (code) => {
-      clearTimeout(timer);
+      clearTimeout(idleTimer);
       let text = '';
       try {
         text = (await readFile(outFile, 'utf8')).trim();

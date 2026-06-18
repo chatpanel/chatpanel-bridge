@@ -14,7 +14,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin } from '../env.js';
 
-const TIMEOUT_MS = Number(process.env.CHATPANEL_GEMINI_TIMEOUT_MS) || 180_000;
+// Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
+// streaming never trips it — only true silence does. Override with
+// CHATPANEL_GEMINI_TIMEOUT_MS (ms).
+const IDLE_MS = Number(process.env.CHATPANEL_GEMINI_TIMEOUT_MS) || 180_000;
 const SCRATCH = path.join(os.tmpdir(), 'chatpanel-gemini-scratch');
 
 let installed = false;
@@ -76,24 +79,30 @@ export async function chat({ messages, system, options }, emit) {
     let out = '';
     let err = '';
     let streamed = false;
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`Gemini timed out after ${Math.round(TIMEOUT_MS / 1000)}s.`));
-    }, TIMEOUT_MS);
+    let idleTimer;
+    const armIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error(`Gemini timed out — no output for ${Math.round(IDLE_MS / 1000)}s.`));
+      }, IDLE_MS);
+    };
+    armIdle();
 
     child.stdout.on('data', (d) => {
+      armIdle();
       const s = d.toString();
       out += s;
       streamed = true;
       emit({ type: 'delta', text: s });
     });
-    child.stderr.on('data', (d) => (err += d.toString()));
+    child.stderr.on('data', (d) => { armIdle(); err += d.toString(); });
     child.on('error', (e) => {
-      clearTimeout(timer);
+      clearTimeout(idleTimer);
       reject(new Error(`Failed to start gemini: ${e.message}`));
     });
     child.on('close', (code) => {
-      clearTimeout(timer);
+      clearTimeout(idleTimer);
       if (code === 0) {
         if (!streamed) emit({ type: 'delta', text: out.trim() || '(no output)' });
         emit({ type: 'done', text: '' });

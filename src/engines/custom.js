@@ -21,7 +21,10 @@ import { resolveCommand, buildSpawnSpec } from '../env.js';
 import { isProEntitled } from '../entitlement.js';
 import { handleMessage } from './claude.js';
 
-const TIMEOUT_MS = Number(process.env.CHATPANEL_CUSTOM_TIMEOUT_MS) || 180_000;
+// Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
+// streaming never trips it — only true silence does. Override with
+// CHATPANEL_CUSTOM_TIMEOUT_MS (ms).
+const IDLE_MS = Number(process.env.CHATPANEL_CUSTOM_TIMEOUT_MS) || 180_000;
 
 export async function available() {
   // The engine ships in every bridge; individual custom agents are user-defined
@@ -98,12 +101,18 @@ export async function chat({ messages, system, options }, emit) {
     let resultText = '';
     let jsonBuf = '';
 
-    const timer = setTimeout(() => {
-      child.kill('SIGKILL');
-      reject(new Error(`${label} timed out after ${Math.round(TIMEOUT_MS / 1000)}s.`));
-    }, TIMEOUT_MS);
+    let idleTimer;
+    const armIdle = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error(`${label} timed out — no output for ${Math.round(IDLE_MS / 1000)}s.`));
+      }, IDLE_MS);
+    };
+    armIdle();
 
     child.stdout.on('data', (d) => {
+      armIdle();
       const s = d.toString();
       if (fmt === 'claude-stream-json') {
         jsonBuf += s;
@@ -127,13 +136,13 @@ export async function chat({ messages, system, options }, emit) {
         emit({ type: 'delta', text: s });
       }
     });
-    child.stderr.on('data', (d) => (stderr += d.toString()));
+    child.stderr.on('data', (d) => { armIdle(); stderr += d.toString(); });
     child.on('error', (e) => {
-      clearTimeout(timer);
+      clearTimeout(idleTimer);
       reject(new Error(`Failed to start ${label}: ${e.message}`));
     });
     child.on('close', (code) => {
-      clearTimeout(timer);
+      clearTimeout(idleTimer);
       if (code === 0) {
         emit({ type: 'done', text: streamedAny ? '' : resultText });
         resolve();
