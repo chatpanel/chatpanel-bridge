@@ -244,6 +244,7 @@ export async function chat({ messages, system, options, images }, emit) {
     }: ${imageFiles.join(', ')}`;
   }
 
+  if (options.extraArgs) args.push(...String(options.extraArgs).split(/\s+/).filter(Boolean));
   const run = runClaude({ prompt, args, cwd, emit });
   if (run === null) {
     cleanup(); // SDK fallback doesn't take images yet

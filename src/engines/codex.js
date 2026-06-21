@@ -156,6 +156,7 @@ export async function chat({ messages, system, options, images }, emit) {
     args.push('-c', `mcp_servers.${name}.args=${JSON.stringify(pargs)}`);
   }
   if (options.model) args.push('-m', options.model);
+  if (options.extraArgs) args.push(...String(options.extraArgs).split(/\s+/).filter(Boolean));
   for (const f of imageFiles) args.push('-i', f); // attach images to the initial prompt
   args.push('-');
 

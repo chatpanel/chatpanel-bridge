@@ -115,6 +115,7 @@ export async function chat({ messages, system, options, images }, emit) {
   const args = ['-p', prompt];
   if (options.model) args.push('--model', options.model);
   if (options.permissionMode === 'bypassPermissions') args.push('--dangerously-skip-permissions');
+  if (options.extraArgs) args.push(...String(options.extraArgs).split(/\s+/).filter(Boolean));
 
   await new Promise((resolve, reject) => {
     let child;

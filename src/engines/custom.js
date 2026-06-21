@@ -171,6 +171,10 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
     : spec.args
       ? String(spec.args).split(/\s+/).filter(Boolean)
       : [];
+  // User-supplied extra CLI flags (Settings → agent → "Extra arguments"), placed
+  // right after the base args/subcommand — e.g. opencode `run --format json
+  // --dangerously-skip-permissions`. Applies to every built-in & custom CLI agent.
+  if (options.extraArgs) args.push(...String(options.extraArgs).split(/\s+/).filter(Boolean));
   // Inject the selected model via the agent's CONFIGURED model-arg template
   // (e.g. "--model {model}" or, for opencode, "-m {model}" with provider/model).
   // Without a template we can't know how this CLI takes a model, so options.model
