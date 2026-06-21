@@ -25,11 +25,12 @@ import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
 import { enrichPath, findAgentBin, resolveCommand } from './env.js';
 import { checkForUpdate, selfUpdate } from './update.js';
+import { callLocalMcp } from './mcp-local.js';
 
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.6.0';
+const VERSION = '0.7.0';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -273,6 +274,36 @@ async function handleMcp(req, res, sessionId) {
   return fail(-32601, `Method not found: ${msg.method}`);
 }
 
+// POST /mcp-local — proxy one JSON-RPC message to a user-configured STDIO MCP
+// server that the bridge spawns and keeps alive. Body: { server:{id,command,args,
+// env?,cwd?}, message }. Returns the full JSON-RPC response (or 202 for a
+// notification). Lets the extension use local MCP servers it can't spawn itself.
+async function handleMcpLocal(req, res) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return json(res, 400, { error: 'Bad JSON: ' + e.message });
+  }
+  const server = body.server || {};
+  const message = body.message;
+  if (!server.command || !message) return json(res, 400, { error: 'need server.command and message' });
+  try {
+    const result = await callLocalMcp(
+      { key: server.id, command: server.command, args: server.args, env: server.env, cwd: server.cwd },
+      message,
+    );
+    if (message.id == null) { res.writeHead(202); return res.end(); }
+    return json(res, 200, result); // the full JSON-RPC response message
+  } catch (e) {
+    return json(res, 200, {
+      jsonrpc: '2.0',
+      id: message.id ?? null,
+      error: { code: -32000, message: String(e?.message || e) },
+    });
+  }
+}
+
 // POST /tool-result — the extension returns a relayed tool's result.
 async function handleToolResult(req, res) {
   let body;
@@ -400,6 +431,7 @@ const server = createServer(async (req, res) => {
       if (req.method === 'DELETE') { deleteSession(sid); res.writeHead(204); return res.end(); }
     }
     if (req.method === 'POST' && url.pathname === '/tool-result') return handleToolResult(req, res);
+    if (req.method === 'POST' && url.pathname === '/mcp-local') return handleMcpLocal(req, res);
     if (req.method === 'POST' && url.pathname === '/complete') return handleComplete(req, res);
     if (req.method === 'POST' && url.pathname === '/list-models') return handleListModels(req, res);
     if (req.method === 'POST' && url.pathname === '/agent-check') return handleAgentCheck(req, res);
@@ -413,6 +445,59 @@ const server = createServer(async (req, res) => {
 function log(level, msg) {
   const fn = level === 'error' ? console.error : console.log;
   fn(`[chatpanel-bridge] ${msg}`);
+}
+
+// `--mcp-stdio <url>` — run as a stdio↔HTTP MCP proxy: read newline-delimited
+// JSON-RPC from stdin, forward each message to the bridge's HTTP MCP endpoint
+// (<url> = http://127.0.0.1:PORT/mcp/<session>), and write responses to stdout.
+// This lets ANY stdio-MCP CLI (Codex, a custom CLI) use the browser tools with
+// the bridge binary itself as the MCP server command — no extra runtime needed.
+function runMcpStdioProxy(url) {
+  let buf = '';
+  const queue = [];
+  let draining = false;
+  let ended = false;
+  const maybeExit = () => { if (ended && !draining && !queue.length) process.exit(0); };
+  const drain = async () => {
+    if (draining) return;
+    draining = true;
+    while (queue.length) {
+      const line = queue.shift();
+      let msg;
+      try { msg = JSON.parse(line); } catch { continue; }
+      try {
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+          body: line,
+        });
+        if (msg.id == null) continue; // notification — no response expected
+        const text = (await res.text()).trim();
+        if (text) process.stdout.write(text + '\n');
+      } catch (e) {
+        if (msg.id != null) {
+          process.stdout.write(
+            JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32000, message: String(e?.message || e) } }) + '\n',
+          );
+        }
+      }
+    }
+    draining = false;
+    maybeExit(); // stdin closed mid-flight → exit only after the queue is drained
+  };
+  process.stdin.setEncoding('utf8');
+  process.stdin.on('data', (chunk) => {
+    buf += chunk;
+    let nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (line) queue.push(line);
+    }
+    drain();
+  });
+  process.stdin.on('end', () => { ended = true; maybeExit(); });
+  process.stdin.resume();
 }
 
 function startServer() {
@@ -488,7 +573,15 @@ function runCli() {
   return false;
 }
 
-if (process.argv.includes('--update')) {
+const mcpStdioIdx = process.argv.indexOf('--mcp-stdio');
+if (mcpStdioIdx >= 0) {
+  const url = process.argv[mcpStdioIdx + 1];
+  if (!url) {
+    console.error('--mcp-stdio requires a URL');
+    process.exit(1);
+  }
+  runMcpStdioProxy(url);
+} else if (process.argv.includes('--update')) {
   (async () => {
     try {
       const r = await selfUpdate(VERSION);

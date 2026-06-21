@@ -48,6 +48,19 @@ export function isCompiledBinary() {
   return !(base.startsWith('node') || base.startsWith('bun'));
 }
 
+// How to re-invoke THIS bridge as a child process running the stdio↔HTTP MCP
+// proxy (`--mcp-stdio <url>`). Lets ANY stdio-capable MCP CLI (Codex, a custom
+// CLI) reach the bridge's HTTP MCP server using the bridge itself as the server
+// command — no extra runtime to install. Compiled binary → the binary; Node →
+// node + this entry script. Returns { command, args }.
+export function selfMcpStdio(url) {
+  const args = ['--mcp-stdio', url];
+  if (isCompiledBinary()) return { command: process.execPath, args };
+  // Node/Bun: re-run this same entry script (server.js) under the same runtime.
+  const entry = process.argv[1] || path.join(process.cwd(), 'src', 'server.js');
+  return { command: process.execPath, args: [entry, ...args] };
+}
+
 // Ask the user's login shell to locate a command — no hardcoded locations, works
 // wherever the user actually installed it.
 function shellWhich(name) {

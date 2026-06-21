@@ -19,7 +19,7 @@ import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { existsSync, mkdirSync, symlinkSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { findAgentBin } from '../env.js';
+import { findAgentBin, selfMcpStdio } from '../env.js';
 
 // Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
 // streaming never trips it — only true silence does. Override with
@@ -146,6 +146,15 @@ export async function chat({ messages, system, options, images }, emit) {
   // local-config mode). The sandbox above still bounds what can actually happen.
   args.push('-c', 'approval_policy=never');
   if (REASONING) args.push('-c', `model_reasoning_effort=${REASONING}`);
+  // Browser tools: register the bridge's MCP server as a stdio MCP server (the
+  // bridge binary in --mcp-stdio mode), so Codex can call our page-action tools.
+  // `-c key=value` parses value as TOML; JSON.stringify yields valid TOML here.
+  if (options.mcp?.url) {
+    const name = options.mcp.serverName || 'chatpanel_browser';
+    const { command, args: pargs } = selfMcpStdio(options.mcp.url);
+    args.push('-c', `mcp_servers.${name}.command=${JSON.stringify(command)}`);
+    args.push('-c', `mcp_servers.${name}.args=${JSON.stringify(pargs)}`);
+  }
   if (options.model) args.push('-m', options.model);
   for (const f of imageFiles) args.push('-i', f); // attach images to the initial prompt
   args.push('-');

@@ -19,7 +19,7 @@ import { spawn } from 'node:child_process';
 import { writeFile, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveCommand, buildSpawnSpec } from '../env.js';
+import { resolveCommand, buildSpawnSpec, selfMcpStdio } from '../env.js';
 import { isProEntitled } from '../entitlement.js';
 import { handleMessage } from './claude.js';
 
@@ -187,7 +187,26 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
   // just before the prompt (arg mode) or get appended (stdin mode).
   const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const imageFiles = spec.imageArg ? await writeImages(images, tag) : [];
-  const cleanup = () => imageFiles.forEach((f) => unlink(f).catch(() => {}));
+  const mcpFiles = [];
+  const cleanup = () => [...imageFiles, ...mcpFiles].forEach((f) => unlink(f).catch(() => {}));
+
+  // Browser tools: when armed (options.mcp) AND this CLI knows how to take an MCP
+  // config file (spec.mcpArg, e.g. "--mcp-config {file}"), write a standard
+  // mcpServers JSON pointing at the bridge's stdio MCP proxy and inject the flag.
+  // Covers any CLI that reads the de-facto {mcpServers:{name:{command,args}}} shape.
+  if (options.mcp?.url && spec.mcpArg) {
+    const name = options.mcp.serverName || 'chatpanel_browser';
+    const { command, args: pargs } = selfMcpStdio(options.mcp.url);
+    const cfgFile = path.join(os.tmpdir(), `chatpanel-mcp-${tag}.json`);
+    await writeFile(cfgFile, JSON.stringify({ mcpServers: { [name]: { command, args: pargs } } }));
+    mcpFiles.push(cfgFile);
+    const tmpl = String(spec.mcpArg);
+    const tokens = tmpl.includes('{file}')
+      ? tmpl.replaceAll('{file}', cfgFile).split(/\s+/).filter(Boolean)
+      : [...tmpl.split(/\s+/).filter(Boolean), cfgFile];
+    args = [...tokens, ...args];
+  }
+
   const imageTokens = imageTokensFor(spec.imageArg, imageFiles);
   let placedImages = false;
   if (imageTokens.length) {
