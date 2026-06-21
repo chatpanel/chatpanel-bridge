@@ -18,7 +18,37 @@ permissions:
   contents: write
 
 jobs:
+  # Create the GitHub Release ONCE, before the matrix fans out. Previously each
+  # of the three build jobs tried to create-or-update the release in parallel and
+  # raced — the losers failed with "already_exists" and their binary never
+  # attached (e.g. linux-x64 silently missing). Now they only UPLOAD to a release
+  # that already exists. Idempotent: a re-run finds the release and continues.
+  create-release:
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Create the release (once)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes "Standalone ChatPanel Bridge binaries — no Node.js required.
+
+          **Run once to install background auto-start:**
+          - macOS / Linux: \`chmod +x chatpanel-bridge-* && ./chatpanel-bridge-* --install\`
+          - Windows: \`chatpanel-bridge-windows-x64.exe --install\`
+
+          ⚠️ Not yet code-signed, so macOS Gatekeeper / Windows SmartScreen may
+          warn on first run (on macOS: right-click → Open). Signing is coming." \
+            || echo "Release ${GITHUB_REF_NAME} already exists — continuing."
+
   build:
+    needs: create-release
+    # Run after create-release whether it ran (tag push) or was skipped
+    # (workflow_dispatch builds binaries for testing but doesn't attach them).
+    if: ${{ always() && needs.create-release.result != 'failure' }}
     strategy:
       fail-fast: false
       matrix:
@@ -61,20 +91,16 @@ jobs:
         if: runner.os == 'macOS'
         run: codesign --force --sign - "dist/${{ matrix.out }}"
 
-      - name: Attach to the release
+      # Upload to the already-created release. --clobber overwrites on re-run.
+      # No race: the release exists (create-release ran first), so each job just
+      # attaches its one asset.
+      - name: Upload ${{ matrix.out }} to the release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/${{ matrix.out }}
-          body: |
-            Standalone ChatPanel Bridge binaries — no Node.js required.
-
-            **Run once to install background auto-start:**
-            - macOS / Linux: `chmod +x chatpanel-bridge-* && ./chatpanel-bridge-* --install`
-            - Windows: `chatpanel-bridge-windows-x64.exe --install`
-
-            ⚠️ Not yet code-signed, so macOS Gatekeeper / Windows SmartScreen may
-            warn on first run (on macOS: right-click → Open). Signing is coming.
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${GITHUB_REF_NAME}" "dist/${{ matrix.out }}" --clobber
 
   # Publish to npm so `npx @chatpanel/bridge` (the Node path, for users without a
   # binary) also gets this version. The package is pure JS with no dependencies,
