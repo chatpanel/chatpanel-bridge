@@ -158,9 +158,9 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
   }
 
   const prompt = buildPrompt(messages, system);
-  const cwd = options.workingDir ? path.resolve(options.workingDir) : null;
+  let cwd = options.workingDir ? path.resolve(options.workingDir) : null;
   const label = spec.label || spec.command;
-  const fmt = spec.format === 'claude-stream-json' ? 'claude-stream-json' : 'text';
+  const fmt = ['claude-stream-json', 'opencode-json'].includes(spec.format) ? spec.format : 'text';
 
   // Args: either a real array or a space-split string. With promptVia:'arg' we
   // substitute {prompt} (or append it if there's no placeholder); otherwise the
@@ -184,7 +184,10 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
     const injected = tmpl.includes('{model}')
       ? tmpl.replaceAll('{model}', options.model).split(/\s+/).filter(Boolean)
       : [...tmpl.split(/\s+/).filter(Boolean), options.model];
-    args = [...injected, ...args];
+    // APPEND (not prepend): subcommand CLIs (opencode `run`, kiro `chat`) must
+    // keep the subcommand first — `opencode -m X run` makes `run` look like a
+    // project path, so it never loads opencode.json / its MCP servers.
+    args = [...args, ...injected];
   }
   // Images: write to temp files, expand the agent's imageArg template, then place
   // the tokens. An explicit {images} placeholder in args wins; otherwise they go
@@ -210,6 +213,10 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
       : [...tmpl.split(/\s+/).filter(Boolean), cfgFile];
     args = [...tokens, ...args];
   }
+  // NOTE: opencode only loads MCP from its GLOBAL config (~/.config/opencode),
+  // never a per-run/project file — so we can't inject it here. opencode reaches
+  // the browser tools via the bridge's STABLE /mcp endpoint, registered once with
+  // `opencode mcp add chatpanel --url http://127.0.0.1:4319/mcp`.
 
   const imageTokens = imageTokensFor(spec.imageArg, imageFiles);
   let placedImages = false;
@@ -288,6 +295,28 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
           const r = handleMessage(msg, emit, streamedAny);
           if (r.streamed) streamedAny = true;
           if (r.result != null) resultText = r.result;
+        }
+      } else if (fmt === 'opencode-json') {
+        // opencode `run --format json` emits newline-delimited events: text parts,
+        // tool/tool_use, and errors. Extract the answer text + surface tools/errors.
+        jsonBuf += s;
+        let nl;
+        while ((nl = jsonBuf.indexOf('\n')) >= 0) {
+          const line = jsonBuf.slice(0, nl).trim();
+          jsonBuf = jsonBuf.slice(nl + 1);
+          if (!line.startsWith('{')) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch { continue; }
+          if (ev.type === 'text' && ev.part?.text) {
+            streamedAny = true;
+            emit({ type: 'delta', text: ev.part.text });
+          } else if (ev.type === 'tool' || ev.type === 'tool_use') {
+            const p = ev.part || {};
+            emit({ type: 'tool', name: p.tool || p.name || p.type || 'tool', summary: '' });
+          } else if (ev.type === 'error') {
+            const msg = ev.error?.data?.message || ev.error?.message || ev.error?.name || 'error';
+            emit({ type: 'status', text: String(msg).slice(0, 300) });
+          }
         }
       } else {
         streamedAny = true;

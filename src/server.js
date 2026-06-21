@@ -30,7 +30,7 @@ import { callLocalMcp } from './mcp-local.js';
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.9.0';
+const VERSION = '0.10.0';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -55,11 +55,13 @@ const ENGINES = {
 // result POSTed back to /tool-result. The bridge itself never touches the page.
 // --------------------------------------------------------------------------
 const sessions = new Map(); // sessionId -> { id, emit, specs, pending: Map, nextId }
+let latestSessionId = null; // for the stable /mcp endpoint (CLIs configured once)
 
 function createSession(emit, specs) {
   const id = randomUUID();
   const s = { id, emit, specs, pending: new Map(), nextId: 0 };
   sessions.set(id, s);
+  latestSessionId = id;
   return s;
 }
 
@@ -68,6 +70,17 @@ function deleteSession(id) {
   if (!s) return;
   for (const p of s.pending.values()) p.reject(new Error('chat ended'));
   sessions.delete(id);
+  if (latestSessionId === id) {
+    // fall back to the most-recently-created surviving session, if any
+    const ids = [...sessions.keys()];
+    latestSessionId = ids.length ? ids[ids.length - 1] : null;
+  }
+}
+
+// The session a sessionless /mcp request maps to (CLIs configured once with a
+// stable URL — e.g. `opencode mcp add chatpanel --url …/mcp`). The active chat.
+function activeSession() {
+  return (latestSessionId && sessions.get(latestSessionId)) || null;
 }
 
 // Ask the extension to run a tool and await its result. Resolves to MCP content.
@@ -228,8 +241,9 @@ async function handleChat(req, res) {
   }
 }
 
-// POST /mcp/<session> — the HTTP MCP server the CLI agent connects to. JSON-RPC
-// over POST; tools/call relays to the extension and waits for /tool-result.
+// POST /mcp/<session> (per-run, bridge-injected) OR POST /mcp (stable: routes to
+// the active chat — for CLIs configured once, e.g. `opencode mcp add … …/mcp`).
+// JSON-RPC; tools/call relays to the extension and waits for /tool-result.
 async function handleMcp(req, res, sessionId) {
   let msg;
   try {
@@ -237,9 +251,10 @@ async function handleMcp(req, res, sessionId) {
   } catch {
     return json(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
   }
-  const session = sessions.get(sessionId);
+  // Explicit session id (per-run URL) or the active chat (stable /mcp).
+  const session = sessionId ? sessions.get(sessionId) : activeSession();
   const reply = (result) => {
-    if (sessionId) res.setHeader('Mcp-Session-Id', sessionId);
+    if (session) res.setHeader('Mcp-Session-Id', session.id);
     json(res, 200, { jsonrpc: '2.0', id: msg.id ?? null, result });
   };
   const fail = (code, message) => json(res, 200, { jsonrpc: '2.0', id: msg.id ?? null, error: { code, message } });
@@ -254,7 +269,12 @@ async function handleMcp(req, res, sessionId) {
       serverInfo: { name: 'chatpanel-browser', version: VERSION },
     });
   }
-  if (!session) return fail(-32001, 'Session not found (chat already ended)');
+  // No active chat → advertise zero tools rather than erroring, so a CLI with a
+  // standing /mcp config (run outside ChatPanel) starts cleanly instead of failing.
+  if (!session) {
+    if (msg.method === 'tools/list') return reply({ tools: [] });
+    return fail(-32001, 'No active ChatPanel session — open a chat with “Act on page” on.');
+  }
   if (msg.method === 'tools/list') {
     return reply({
       tools: session.specs.map((s) => ({
@@ -424,6 +444,12 @@ const server = createServer(async (req, res) => {
       });
     }
     if (req.method === 'POST' && url.pathname === '/chat') return handleChat(req, res);
+    // Stable endpoint: routes to the active chat. For CLIs configured once with a
+    // fixed URL (e.g. `opencode mcp add chatpanel --url http://127.0.0.1:4319/mcp`).
+    if (url.pathname === '/mcp') {
+      if (req.method === 'POST') return handleMcp(req, res, null);
+      if (req.method === 'GET') { res.writeHead(405); return res.end(); }
+    }
     if (url.pathname.startsWith('/mcp/')) {
       const sid = decodeURIComponent(url.pathname.slice(5));
       if (req.method === 'POST') return handleMcp(req, res, sid);

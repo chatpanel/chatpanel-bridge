@@ -54,10 +54,17 @@ export const pi = makeCliAgent(
 export const opencode = makeCliAgent(
   'opencode',
   {
-    args: 'run',
+    // `--format json` → clean NDJSON events (the default emits a TUI that's
+    // garbage when piped). --dangerously-skip-permissions so headless tool use
+    // (incl. our relayed browser tools) doesn't block on an approval prompt.
+    args: 'run --format json --dangerously-skip-permissions',
     promptVia: 'arg',
     modelArg: '-m {model}',
     imageArg: '-f {path}',
+    format: 'opencode-json',
+    // Browser tools come via the bridge's STABLE /mcp endpoint, registered once
+    // with `opencode mcp add chatpanel --url http://127.0.0.1:4319/mcp` (opencode
+    // only loads MCP from its global config, not a per-run file).
     listModelsArgs: 'models',
     label: 'OpenCode',
   },
