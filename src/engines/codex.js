@@ -133,18 +133,18 @@ export async function chat({ messages, system, options, images }, emit) {
   const cleanupImages = () => imageFiles.forEach((f) => unlink(f).catch(() => {}));
 
   const cwd = options.workingDir ? path.resolve(options.workingDir) : SCRATCH;
-  const sandbox =
-    options.permissionMode === 'bypassPermissions'
-      ? 'danger-full-access'
-      : options.permissionMode === 'acceptEdits'
-        ? 'workspace-write'
-        : 'read-only';
-
-  const args = ['exec', '--json', '--skip-git-repo-check', '-s', sandbox, '-o', outFile];
-  // Headless exec has no human to approve commands. Auto-run within the sandbox
-  // so skill/startup reads don't get "approval declined" (and skills can load in
-  // local-config mode). The sandbox above still bounds what can actually happen.
-  args.push('-c', 'approval_policy=never');
+  const args = ['exec', '--json', '--skip-git-repo-check', '-o', outFile];
+  // Headless exec has no human to approve actions. With MCP/browser tools armed
+  // Codex would otherwise raise an approval prompt it can't show — and cancel the
+  // tool call. So in bypassPermissions (full autonomy, what "Act on page" needs)
+  // use the all-in bypass flag, which also clears MCP-tool approval. Lower modes
+  // keep the sandbox + never-ask, which auto-runs within bounds.
+  if (options.permissionMode === 'bypassPermissions') {
+    args.push('--dangerously-bypass-approvals-and-sandbox');
+  } else {
+    const sandbox = options.permissionMode === 'acceptEdits' ? 'workspace-write' : 'read-only';
+    args.push('-s', sandbox, '-c', 'approval_policy=never');
+  }
   if (REASONING) args.push('-c', `model_reasoning_effort=${REASONING}`);
   // Browser tools: register the bridge's MCP server as a stdio MCP server (the
   // bridge binary in --mcp-stdio mode), so Codex can call our page-action tools.
