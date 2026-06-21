@@ -195,13 +195,32 @@ export async function chat({ messages, system, options, images }, emit) {
   // Explicit project dir, else null → CLI runs in home (or WSL home).
   const cwd = options.workingDir ? path.resolve(options.workingDir) : null;
 
+  const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const args = ['--print', '--output-format', 'stream-json', '--include-partial-messages', '--verbose'];
 
+  // Browser-tools relay: ChatPanel hands this CLI the page-action tools over an
+  // HTTP MCP server the bridge hosts (which relays each call to the extension).
+  // options.mcp = { url, serverName, specs }. We pre-allow the tools so a headless
+  // run doesn't block on approval, and merge alongside the user's own MCP servers.
+  const mcpFiles = [];
+  const mcpAllow = [];
+  if (options.mcp?.url && Array.isArray(options.mcp.specs) && options.mcp.specs.length) {
+    const serverName = options.mcp.serverName || 'chatpanel_browser';
+    const cfgFile = path.join(os.tmpdir(), `chatpanel-mcp-${tag}.json`);
+    await writeFile(cfgFile, JSON.stringify({ mcpServers: { [serverName]: { type: 'http', url: options.mcp.url } } }));
+    mcpFiles.push(cfgFile);
+    args.push('--mcp-config', cfgFile);
+    for (const s of options.mcp.specs) mcpAllow.push(`mcp__${serverName}__${s.name}`);
+  }
+
   // Gate writes/shell behind the chosen mode; otherwise restrict to read-only
-  // tools so headless runs never block on an approval prompt.
+  // tools so headless runs never block on an approval prompt. The relayed browser
+  // tools are always pre-allowed (the user explicitly armed them this turn).
   if (permissionMode === 'bypassPermissions') args.push('--permission-mode', 'bypassPermissions');
-  else if (permissionMode === 'acceptEdits') args.push('--permission-mode', 'acceptEdits');
-  else args.push('--allowedTools', ...READONLY_TOOLS);
+  else if (permissionMode === 'acceptEdits') {
+    args.push('--permission-mode', 'acceptEdits');
+    if (mcpAllow.length) args.push('--allowedTools', ...mcpAllow);
+  } else args.push('--allowedTools', ...READONLY_TOOLS, ...mcpAllow);
 
   // Native Claude Code behavior; append the user's own system prompt if they set
   // one (no ChatPanel persona injected).
@@ -213,9 +232,11 @@ export async function chat({ messages, system, options, images }, emit) {
 
   // Attach images by writing them to temp files and asking Claude Code to Read
   // them — its Read tool loads images as vision (no special flag needed).
-  const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const imageFiles = await writeImages(images, tag);
-  const cleanup = () => imageFiles.forEach((f) => unlink(f).catch(() => {}));
+  const cleanup = () => {
+    imageFiles.forEach((f) => unlink(f).catch(() => {}));
+    mcpFiles.forEach((f) => unlink(f).catch(() => {}));
+  };
   let prompt = buildPrompt(messages);
   if (imageFiles.length) {
     prompt += `\n\nThe user attached ${imageFiles.length} image file(s). Use the Read tool to view ${

@@ -16,6 +16,7 @@
 
 import { createServer } from 'node:http';
 import os from 'node:os';
+import { randomUUID } from 'node:crypto';
 import * as claude from './engines/claude.js';
 import * as codex from './engines/codex.js';
 import * as antigravity from './engines/antigravity.js';
@@ -28,7 +29,7 @@ import { checkForUpdate, selfUpdate } from './update.js';
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.5.0';
+const VERSION = '0.6.0';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -44,6 +45,59 @@ const ENGINES = {
   // list and validates commands via /agent-check).
   custom: { engine: custom, label: 'Custom', hidden: true },
 };
+
+// --------------------------------------------------------------------------
+// Browser-tools relay. When the extension arms "Act on page" for a CLI agent, it
+// sends the tool specs in /chat. We host an HTTP MCP server (/mcp/<session>) the
+// CLI connects to; each tools/call is RELAYED to the extension over the chat SSE
+// stream (a `tool_request` event), executed there (it owns the browser), and the
+// result POSTed back to /tool-result. The bridge itself never touches the page.
+// --------------------------------------------------------------------------
+const sessions = new Map(); // sessionId -> { id, emit, specs, pending: Map, nextId }
+
+function createSession(emit, specs) {
+  const id = randomUUID();
+  const s = { id, emit, specs, pending: new Map(), nextId: 0 };
+  sessions.set(id, s);
+  return s;
+}
+
+function deleteSession(id) {
+  const s = sessions.get(id);
+  if (!s) return;
+  for (const p of s.pending.values()) p.reject(new Error('chat ended'));
+  sessions.delete(id);
+}
+
+// Ask the extension to run a tool and await its result. Resolves to MCP content.
+function relayToolCall(session, name, input) {
+  return new Promise((resolve, reject) => {
+    const id = `t${++session.nextId}`;
+    const timer = setTimeout(() => {
+      session.pending.delete(id);
+      reject(new Error('tool call timed out'));
+    }, 120_000);
+    session.pending.set(id, {
+      resolve: (result) => { clearTimeout(timer); resolve(toMcpContent(result)); },
+      reject: (e) => { clearTimeout(timer); reject(e); },
+    });
+    session.emit({ type: 'tool_request', session: session.id, id, name, input });
+  });
+}
+
+// The extension returns a string OR { text, image(dataURL) }; map to MCP content.
+function toMcpContent(result) {
+  if (result == null) return { content: [{ type: 'text', text: 'ok' }] };
+  if (typeof result === 'string') return { content: [{ type: 'text', text: result }] };
+  const content = [];
+  if (result.text) content.push({ type: 'text', text: String(result.text) });
+  if (typeof result.image === 'string') {
+    const m = /^data:([^;]+);base64,(.+)$/s.exec(result.image);
+    if (m) content.push({ type: 'image', data: m[2], mimeType: m[1] });
+  }
+  if (!content.length) content.push({ type: 'text', text: 'ok' });
+  return { content };
+}
 
 // --------------------------------------------------------------------------
 // CORS — allow the extension (chrome-extension://…) and localhost dev origins.
@@ -139,24 +193,101 @@ async function handleChat(req, res) {
   let closed = false;
   req.on('close', () => (closed = true));
 
+  const safeEmit = (obj) => { if (!closed) emit(obj); };
+
+  // Browser-tools relay: when the extension sends page-tool specs, host an MCP
+  // server for this turn and tell the engine to point the CLI at it.
+  const options = { ...(body.options || {}) };
+  let session = null;
+  if (body.pageTools?.specs?.length) {
+    session = createSession(safeEmit, body.pageTools.specs);
+    options.mcp = {
+      url: `http://${HOST}:${PORT}/mcp/${session.id}`,
+      serverName: 'chatpanel_browser',
+      specs: body.pageTools.specs,
+    };
+  }
+
   try {
     await target.engine.chat(
       {
         messages: Array.isArray(body.messages) ? body.messages : [],
         system: body.system || '',
-        options: body.options || {},
+        options,
         images: Array.isArray(body.images) ? body.images : [],
       },
-      (obj) => {
-        if (!closed) emit(obj);
-      },
+      safeEmit,
     );
   } catch (e) {
     log('error', `${body.agent} chat failed: ${e?.message || e}`);
     emit({ type: 'error', error: e?.message || String(e) });
   } finally {
+    if (session) deleteSession(session.id);
     if (!res.writableEnded) res.end();
   }
+}
+
+// POST /mcp/<session> — the HTTP MCP server the CLI agent connects to. JSON-RPC
+// over POST; tools/call relays to the extension and waits for /tool-result.
+async function handleMcp(req, res, sessionId) {
+  let msg;
+  try {
+    msg = await readBody(req);
+  } catch {
+    return json(res, 200, { jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } });
+  }
+  const session = sessions.get(sessionId);
+  const reply = (result) => {
+    if (sessionId) res.setHeader('Mcp-Session-Id', sessionId);
+    json(res, 200, { jsonrpc: '2.0', id: msg.id ?? null, result });
+  };
+  const fail = (code, message) => json(res, 200, { jsonrpc: '2.0', id: msg.id ?? null, error: { code, message } });
+
+  // Notifications (no id) — ack and ignore.
+  if (msg.id == null) { res.writeHead(202); return res.end(); }
+
+  if (msg.method === 'initialize') {
+    return reply({
+      protocolVersion: msg.params?.protocolVersion || '2025-06-18',
+      capabilities: { tools: { listChanged: false } },
+      serverInfo: { name: 'chatpanel-browser', version: VERSION },
+    });
+  }
+  if (!session) return fail(-32001, 'Session not found (chat already ended)');
+  if (msg.method === 'tools/list') {
+    return reply({
+      tools: session.specs.map((s) => ({
+        name: s.name,
+        description: s.description,
+        inputSchema: s.parameters || { type: 'object', properties: {} },
+      })),
+    });
+  }
+  if (msg.method === 'tools/call') {
+    try {
+      return reply(await relayToolCall(session, msg.params?.name, msg.params?.arguments || {}));
+    } catch (e) {
+      return reply({ content: [{ type: 'text', text: `error: ${e?.message || e}` }], isError: true });
+    }
+  }
+  return fail(-32601, `Method not found: ${msg.method}`);
+}
+
+// POST /tool-result — the extension returns a relayed tool's result.
+async function handleToolResult(req, res) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return json(res, 400, { error: 'Bad JSON: ' + e.message });
+  }
+  const session = sessions.get(body.session);
+  if (!session) return json(res, 404, { error: 'no such session' });
+  const pending = session.pending.get(body.id);
+  if (!pending) return json(res, 404, { error: 'no such pending call' });
+  session.pending.delete(body.id);
+  pending.resolve(body.result);
+  return json(res, 200, { ok: true });
 }
 
 // POST /complete → { agent, prompt, model? } → { text } — a fast, single-shot
@@ -262,6 +393,13 @@ const server = createServer(async (req, res) => {
       });
     }
     if (req.method === 'POST' && url.pathname === '/chat') return handleChat(req, res);
+    if (url.pathname.startsWith('/mcp/')) {
+      const sid = decodeURIComponent(url.pathname.slice(5));
+      if (req.method === 'POST') return handleMcp(req, res, sid);
+      if (req.method === 'GET') { res.writeHead(405); return res.end(); } // no server-initiated stream
+      if (req.method === 'DELETE') { deleteSession(sid); res.writeHead(204); return res.end(); }
+    }
+    if (req.method === 'POST' && url.pathname === '/tool-result') return handleToolResult(req, res);
     if (req.method === 'POST' && url.pathname === '/complete') return handleComplete(req, res);
     if (req.method === 'POST' && url.pathname === '/list-models') return handleListModels(req, res);
     if (req.method === 'POST' && url.pathname === '/agent-check') return handleAgentCheck(req, res);
