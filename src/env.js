@@ -1,4 +1,4 @@
-// Resolve a usable PATH for spawning the agent CLIs (codex, gemini).
+// Resolve a usable PATH for spawning the agent CLIs (codex, agy).
 //
 // When the bridge runs as a login service (LaunchAgent / Scheduled Task) — or as
 // a double-clicked app — it inherits a MINIMAL PATH, not your interactive shell's.
@@ -14,7 +14,7 @@ let enriched = false;
 
 // The agent CLIs the bridge shells out to. Claude has its own richer resolution
 // (resolveClaude: native / cli.js / WSL / SDK) below.
-const AGENT_CLIS = ['codex', 'gemini', 'claude'];
+const AGENT_CLIS = ['codex', 'claude', 'agy', 'pi', 'opencode', 'kiro-cli'];
 
 // Is `name` executable somewhere on the current PATH?
 function onPath(name) {

@@ -59,6 +59,12 @@ function imageTokensFor(imageArg, files) {
 // CHATPANEL_CUSTOM_TIMEOUT_MS (ms).
 const IDLE_MS = Number(process.env.CHATPANEL_CUSTOM_TIMEOUT_MS) || 180_000;
 
+// Many CLIs emit ANSI colour/escape codes even when piped (kiro-cli does), which
+// leak into the answer as `\x1b[38;5;141m…`. Strip them from text output. (We
+// also set NO_COLOR on the child env, but this is the robust backstop.)
+const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+const stripAnsi = (s) => s.replace(ANSI_RE, '');
+
 export async function available() {
   // The engine ships in every bridge; individual custom agents are user-defined
   // (Pro) and validated per request and via /agent-check.
@@ -92,19 +98,26 @@ export async function listModels(options = {}) {
     throw new Error('Custom agents require ChatPanel Pro.');
   }
   const spec = options.custom || {};
-  const listArgs = String(spec.listModelsArgs || '').trim();
-  if (!spec.command || !listArgs) return [];
-  const resolved = resolveCommand(spec.command);
-  if (!resolved) throw new Error(`Couldn't find "${spec.command}".`);
-  const cwd = options.workingDir ? path.resolve(options.workingDir) : null;
+  return listSpecModels(spec.command, spec.listModelsArgs, options.workingDir);
+}
+
+// Shared model listing (no Pro gate): run a CLI's list-models invocation and
+// parse it. Used by the Pro custom engine (gated above) AND built-in CLI agents.
+export async function listSpecModels(command, listModelsArgs, workingDir) {
+  const listArgs = String(listModelsArgs || '').trim();
+  if (!command || !listArgs) return [];
+  const resolved = resolveCommand(command);
+  if (!resolved) throw new Error(`Couldn't find "${command}".`);
+  const cwd = workingDir ? path.resolve(workingDir) : null;
   const [bin, argv, opts] = buildSpawnSpec(resolved, listArgs.split(/\s+/).filter(Boolean), cwd);
+  opts.env = { ...(opts.env || process.env), NO_COLOR: '1', CLICOLOR: '0' };
   const stdout = await new Promise((resolve, reject) => {
     let child;
-    try { child = spawn(bin, argv, opts); } catch (e) { return reject(new Error(`Failed to start ${spec.command}: ${e.message}`)); }
+    try { child = spawn(bin, argv, opts); } catch (e) { return reject(new Error(`Failed to start ${command}: ${e.message}`)); }
     let out = '';
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('Listing models timed out.')); }, 20000);
     child.stdout.on('data', (d) => (out += d.toString()));
-    child.on('error', (e) => { clearTimeout(timer); reject(new Error(`Failed to start ${spec.command}: ${e.message}`)); });
+    child.on('error', (e) => { clearTimeout(timer); reject(new Error(`Failed to start ${command}: ${e.message}`)); });
     child.on('close', () => { clearTimeout(timer); resolve(out); });
     try { child.stdin.end(); } catch { /* some CLIs don't read stdin */ }
   });
@@ -130,9 +143,14 @@ export async function chat({ messages, system, options, images }, emit) {
   if (!(await isProEntitled(options.entitlement))) {
     throw new Error('Custom agents require ChatPanel Pro. Upgrade in Settings to bring your own CLI agent.');
   }
+  return runSpec(options.custom || {}, { messages, system, options, images }, emit);
+}
 
-  const spec = options.custom || {};
-  if (!spec.command) throw new Error('This custom agent has no command configured.');
+// Run a CLI agent from a spec — SHARED by the Pro custom engine (gated in chat()
+// above) and the built-in CLI engines (pi/opencode/kiro). This never gates; the
+// built-in agents are bounded instead by the extension's free 1-agent limit.
+export async function runSpec(spec, { messages, system, options = {}, images }, emit) {
+  if (!spec.command) throw new Error('This agent has no command configured.');
 
   const resolved = resolveCommand(spec.command);
   if (!resolved) {
@@ -200,6 +218,8 @@ export async function chat({ messages, system, options, images }, emit) {
   }
 
   const [bin, argv, opts] = buildSpawnSpec(resolved, args, cwd);
+  // Discourage CLIs from colourizing output (kiro-cli etc.) when piped.
+  opts.env = { ...(opts.env || process.env), NO_COLOR: '1', FORCE_COLOR: '0', CLICOLOR: '0', TERM: 'dumb' };
 
   await new Promise((resolve, reject) => {
     let child;
@@ -248,7 +268,7 @@ export async function chat({ messages, system, options, images }, emit) {
         }
       } else {
         streamedAny = true;
-        emit({ type: 'delta', text: s });
+        emit({ type: 'delta', text: stripAnsi(s) });
       }
     });
     child.stderr.on('data', (d) => { armIdle(); stderr += d.toString(); });

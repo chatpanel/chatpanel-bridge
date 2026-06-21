@@ -1,12 +1,14 @@
-// Gemini engine — drives the Gemini CLI (`gemini -p`) using your local login.
+// Antigravity engine — drives the Antigravity CLI (`agy -p`) using your local
+// login. This replaces Gemini CLI as the default Google-model agent (the Gemini
+// CLI is being deprecated for individual users).
 //
-// Like the Codex engine, this shells out to the installed `gemini` binary in
-// non-interactive mode: `gemini -p "<prompt>"` runs once, prints the answer to
-// stdout, and exits. We run in an empty scratch dir for general chat so Gemini
-// never crawls the bridge's own files; set a working dir on the agent to point
-// it at a real project.
+//   agy -p "<prompt>"   → run one prompt non-interactively, print the answer, exit
+//   agy --model <id>    → pick the model      agy models → list models
 //
-// Install: `npm i -g @google/gemini-cli`, then run `gemini` once to sign in.
+// Images: Antigravity has no image flag, but it READS image files referenced by
+// path in the prompt (vision) — same approach as Claude Code. We write the image
+// into the workspace (cwd), grant read access with --add-dir, and reference the
+// path so the model opens it.
 
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
@@ -14,38 +16,50 @@ import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin } from '../env.js';
 
-// Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
-// streaming never trips it — only true silence does. Override with
-// CHATPANEL_GEMINI_TIMEOUT_MS (ms).
-const IDLE_MS = Number(process.env.CHATPANEL_GEMINI_TIMEOUT_MS) || 180_000;
-const SCRATCH = path.join(os.tmpdir(), 'chatpanel-gemini-scratch');
+const IDLE_MS = Number(process.env.CHATPANEL_AGY_TIMEOUT_MS) || 180_000;
+const SCRATCH = path.join(os.tmpdir(), 'chatpanel-agy-scratch');
 
-// Gemini CLI has no "list models" command (--help only lists extensions/sessions)
-// and stores no model in settings.json, so offer the common current ids. Free
-// text still accepted.
+// `agy models` lists available models. Parse ids best-effort; free text is still
+// accepted by the picker, and [] just means "type a model or use the default".
 export async function listModels() {
-  return ['gemini-2.5-pro', 'gemini-2.5-flash', 'gemini-2.5-flash-lite'];
+  try {
+    const bin = findAgentBin('agy') || 'agy';
+    const r = spawnSync(bin, ['models'], { encoding: 'utf8', timeout: 15000 });
+    const ids = [];
+    const seen = new Set();
+    for (const line of String(r.stdout || '').split('\n')) {
+      const tok = line.trim().split(/\s+/)[0] || '';
+      if (!/^[A-Za-z0-9][\w./:-]{1,79}$/.test(tok)) continue;
+      if (/^(name|model|models|id|provider|available)$/i.test(tok)) continue;
+      if (seen.has(tok)) continue;
+      seen.add(tok);
+      ids.push(tok);
+      if (ids.length >= 100) break;
+    }
+    return ids;
+  } catch {
+    return [];
+  }
 }
 
 let installed = false;
 let lastProbe = 0;
 export async function available() {
-  // Cache a positive result, but keep re-probing (throttled) while not found, so
-  // it self-heals once gemini appears on PATH — never cache a negative forever.
+  // Cache a positive result; keep re-probing (throttled) while not found so it
+  // self-heals once agy appears on PATH — never cache a negative forever.
   if (!installed && Date.now() - lastProbe > 4000) {
     lastProbe = Date.now();
     try {
-      installed = !!findAgentBin('gemini');
+      installed = !!findAgentBin('agy');
     } catch {
       installed = false;
     }
   }
   return installed
     ? { ok: true }
-    : { ok: false, reason: 'gemini not found on PATH. Install @google/gemini-cli, then run `gemini` once to sign in.' };
+    : { ok: false, reason: 'agy not found on PATH. Install Antigravity, then run `agy` once to sign in.' };
 }
 
-// Write base64 data-URL images into `dir` so Gemini's `@<file>` can read them.
 function writeImages(images, dir) {
   const files = [];
   for (let i = 0; i < (images?.length || 0); i++) {
@@ -63,6 +77,7 @@ function writeImages(images, dir) {
   return files;
 }
 
+// The bridge is stateless, so replay the conversation as a single prompt.
 function buildPrompt(messages, system) {
   let p = system ? `${system}\n\n` : '';
   const history = messages.slice(0, -1);
@@ -84,9 +99,9 @@ export async function chat({ messages, system, options, images }, emit) {
   }
   const cwd = options.workingDir ? path.resolve(options.workingDir) : SCRATCH;
 
-  // Images: write them into the cwd so Gemini's `@file` reference (which reads
-  // files — including images — as multimodal input) can resolve them. Cleaned up
-  // after the run. Written into cwd (not tmp) because `@` resolves to the workspace.
+  // Images: write into the cwd (workspace) and reference with `@<file>` — agy
+  // reads @-referenced files (incl. images) inline as multimodal input, so no
+  // read-tool approval is needed in headless `-p` mode. (Confirmed working.)
   const imageFiles = writeImages(images, cwd);
   const cleanup = () => imageFiles.forEach((f) => { try { unlinkSync(f); } catch { /* gone */ } });
   let prompt = buildPrompt(messages, system);
@@ -94,22 +109,20 @@ export async function chat({ messages, system, options, images }, emit) {
     prompt += `\n\nThe user attached image(s): ${imageFiles.map((f) => '@' + path.basename(f)).join(' ')}`;
   }
 
-  // `-p` is non-interactive (no TTY prompts). `-m` picks the model. `-y` (yolo)
-  // auto-approves tool calls when the user opted into bypassPermissions — without
-  // it Gemini would block on an approval it can't show in a headless run.
+  // `-p` runs one prompt non-interactively. --model picks the model.
+  // --dangerously-skip-permissions auto-approves tool use (headless has no human
+  // approver) only when the user opted into bypassPermissions.
   const args = ['-p', prompt];
-  if (options.model) args.push('-m', options.model);
-  if (options.permissionMode === 'bypassPermissions') args.push('-y');
+  if (options.model) args.push('--model', options.model);
+  if (options.permissionMode === 'bypassPermissions') args.push('--dangerously-skip-permissions');
 
   await new Promise((resolve, reject) => {
     let child;
     try {
-      // stdin ignored: the prompt is passed via -p, and no TTY means no
-      // interactive "trust this folder?" dialog can block us.
-      child = spawn('gemini', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+      child = spawn('agy', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
     } catch (e) {
       cleanup();
-      return reject(new Error(`Failed to start gemini: ${e.message}`));
+      return reject(new Error(`Failed to start agy: ${e.message}`));
     }
 
     let out = '';
@@ -121,7 +134,7 @@ export async function chat({ messages, system, options, images }, emit) {
       idleTimer = setTimeout(() => {
         child.kill('SIGKILL');
         cleanup();
-        reject(new Error(`Gemini timed out — no output for ${Math.round(IDLE_MS / 1000)}s.`));
+        reject(new Error(`Antigravity timed out — no output for ${Math.round(IDLE_MS / 1000)}s.`));
       }, IDLE_MS);
     };
     armIdle();
@@ -137,7 +150,7 @@ export async function chat({ messages, system, options, images }, emit) {
     child.on('error', (e) => {
       clearTimeout(idleTimer);
       cleanup();
-      reject(new Error(`Failed to start gemini: ${e.message}`));
+      reject(new Error(`Failed to start agy: ${e.message}`));
     });
     child.on('close', (code) => {
       clearTimeout(idleTimer);
@@ -147,7 +160,7 @@ export async function chat({ messages, system, options, images }, emit) {
         emit({ type: 'done', text: '' });
         resolve();
       } else {
-        reject(new Error(`Gemini exited ${code}: ${err.trim() || out.trim() || 'failed'}`));
+        reject(new Error(`Antigravity exited ${code}: ${err.trim() || out.trim() || 'failed'}`));
       }
     });
   });

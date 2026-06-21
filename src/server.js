@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // ChatPanel Bridge — a tiny localhost server that exposes the coding agents
-// running on this machine (Claude Code, Codex and Gemini, each via its CLI) to
+// running on this machine (Claude Code, Codex and Antigravity, each via its CLI) to
 // the ChatPanel Chrome extension. Zero runtime dependencies.
 //
 //   GET  /health  → { ok, version, agents: [...], update: {current,latest,…} }
@@ -18,7 +18,8 @@ import { createServer } from 'node:http';
 import os from 'node:os';
 import * as claude from './engines/claude.js';
 import * as codex from './engines/codex.js';
-import * as gemini from './engines/gemini.js';
+import * as antigravity from './engines/antigravity.js';
+import { pi, opencode, kiro } from './engines/cli-agents.js';
 import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
 import { enrichPath, findAgentBin, resolveCommand } from './env.js';
@@ -27,14 +28,17 @@ import { checkForUpdate, selfUpdate } from './update.js';
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
 const ENGINES = {
   claude: { engine: claude, label: 'Claude Code' },
   codex: { engine: codex, label: 'Codex' },
-  gemini: { engine: gemini, label: 'Gemini CLI' },
+  antigravity: { engine: antigravity, label: 'Antigravity' },
+  pi: { engine: pi, label: 'Pi' },
+  opencode: { engine: opencode, label: 'OpenCode' },
+  kiro: { engine: kiro, label: 'Kiro' },
   // "Bring your own" — one engine drives any user-onboarded CLI (Pro). Hidden
   // from /health (it's not a single installable agent; the extension manages the
   // list and validates commands via /agent-check).
@@ -253,7 +257,7 @@ const server = createServer(async (req, res) => {
         version: VERSION,
         home: os.homedir(),
         codex: findAgentBin('codex') || null,
-        gemini: findAgentBin('gemini') || null,
+        agy: findAgentBin('agy') || null,
         path: process.env.PATH,
       });
     }
@@ -282,7 +286,7 @@ function startServer() {
       const a = await engine.available().catch(() => ({ ok: false }));
       log('info', `  ${a.ok ? '✓' : '✕'} ${label}${a.ok ? '' : ' — ' + (a.reason || 'unavailable')}`);
     }
-    log('info', 'Open the ChatPanel side panel; installed agents (Claude Code, Codex, Gemini CLI) appear automatically.');
+    log('info', 'Open the ChatPanel side panel; installed agents (Claude Code, Codex, Antigravity) appear automatically.');
   });
 }
 
