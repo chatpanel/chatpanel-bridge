@@ -27,7 +27,7 @@ import { checkForUpdate, selfUpdate } from './update.js';
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.3.3';
+const VERSION = '0.4.0';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -117,6 +117,9 @@ async function handleChat(req, res) {
   }
   const target = ENGINES[body.agent];
   if (!target) return json(res, 404, { error: `Unknown agent "${body.agent}"` });
+  if (Array.isArray(body.images) && body.images.length) {
+    log('info', `chat: ${body.agent} received ${body.images.length} image(s)`);
+  }
 
   // Open the SSE stream.
   res.writeHead(200, {
@@ -138,6 +141,7 @@ async function handleChat(req, res) {
         messages: Array.isArray(body.messages) ? body.messages : [],
         system: body.system || '',
         options: body.options || {},
+        images: Array.isArray(body.images) ? body.images : [],
       },
       (obj) => {
         if (!closed) emit(obj);

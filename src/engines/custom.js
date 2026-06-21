@@ -16,10 +16,43 @@
 //                      speak it), reusing the Claude engine's parser.
 
 import { spawn } from 'node:child_process';
+import { writeFile, unlink } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { resolveCommand, buildSpawnSpec } from '../env.js';
 import { isProEntitled } from '../entitlement.js';
 import { handleMessage } from './claude.js';
+
+// Write base64 data-URL images to temp files so a custom CLI can take them via
+// its configured `imageArg` template (e.g. "-i {path}", "@{path}"). Returns paths.
+async function writeImages(images, tag) {
+  const files = [];
+  for (let i = 0; i < (images?.length || 0); i++) {
+    const m = /^data:([^;]+);base64,(.+)$/s.exec(images[i]?.dataUrl || '');
+    if (!m) continue;
+    const ext = (m[1].split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '').slice(0, 5) || 'png';
+    const file = path.join(os.tmpdir(), `chatpanel-custom-img-${tag}-${i}.${ext}`);
+    await writeFile(file, Buffer.from(m[2], 'base64'));
+    files.push(file);
+  }
+  return files;
+}
+
+// Expand the user's `imageArg` template across the image files into argv tokens.
+// "{path}" is substituted per image; a template without it appends the path.
+function imageTokensFor(imageArg, files) {
+  const tmpl = String(imageArg || '').trim();
+  if (!tmpl || !files.length) return [];
+  const tokens = [];
+  for (const f of files) {
+    tokens.push(
+      ...(tmpl.includes('{path}')
+        ? tmpl.replaceAll('{path}', f).split(/\s+/).filter(Boolean)
+        : [...tmpl.split(/\s+/).filter(Boolean), f]),
+    );
+  }
+  return tokens;
+}
 
 // Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
 // streaming never trips it — only true silence does. Override with
@@ -92,7 +125,7 @@ function buildPrompt(messages, system) {
   return p;
 }
 
-export async function chat({ messages, system, options }, emit) {
+export async function chat({ messages, system, options, images }, emit) {
   // Pro gate — verified, not just UI. No valid signed entitlement → no run.
   if (!(await isProEntitled(options.entitlement))) {
     throw new Error('Custom agents require ChatPanel Pro. Upgrade in Settings to bring your own CLI agent.');
@@ -131,6 +164,24 @@ export async function chat({ messages, system, options }, emit) {
       : [...tmpl.split(/\s+/).filter(Boolean), options.model];
     args = [...injected, ...args];
   }
+  // Images: write to temp files, expand the agent's imageArg template, then place
+  // the tokens. An explicit {images} placeholder in args wins; otherwise they go
+  // just before the prompt (arg mode) or get appended (stdin mode).
+  const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const imageFiles = spec.imageArg ? await writeImages(images, tag) : [];
+  const cleanup = () => imageFiles.forEach((f) => unlink(f).catch(() => {}));
+  const imageTokens = imageTokensFor(spec.imageArg, imageFiles);
+  let placedImages = false;
+  if (imageTokens.length) {
+    args = args.flatMap((a) => {
+      if (a === '{images}') {
+        placedImages = true;
+        return imageTokens;
+      }
+      return [a];
+    });
+  }
+
   if (promptVia === 'arg') {
     let placed = false;
     args = args.map((a) => {
@@ -140,7 +191,12 @@ export async function chat({ messages, system, options }, emit) {
       }
       return a;
     });
-    if (!placed) args.push(prompt);
+    if (!placed) {
+      if (imageTokens.length && !placedImages) args.push(...imageTokens); // images, then prompt
+      args.push(prompt);
+    }
+  } else if (imageTokens.length && !placedImages) {
+    args.push(...imageTokens); // stdin prompt: image tokens go on argv
   }
 
   const [bin, argv, opts] = buildSpawnSpec(resolved, args, cwd);
@@ -150,6 +206,7 @@ export async function chat({ messages, system, options }, emit) {
     try {
       child = spawn(bin, argv, opts);
     } catch (e) {
+      cleanup();
       return reject(new Error(`Failed to start ${label}: ${e.message}`));
     }
 
@@ -163,6 +220,7 @@ export async function chat({ messages, system, options }, emit) {
       clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
         child.kill('SIGKILL');
+        cleanup();
         reject(new Error(`${label} timed out — no output for ${Math.round(IDLE_MS / 1000)}s.`));
       }, IDLE_MS);
     };
@@ -196,10 +254,12 @@ export async function chat({ messages, system, options }, emit) {
     child.stderr.on('data', (d) => { armIdle(); stderr += d.toString(); });
     child.on('error', (e) => {
       clearTimeout(idleTimer);
+      cleanup();
       reject(new Error(`Failed to start ${label}: ${e.message}`));
     });
     child.on('close', (code) => {
       clearTimeout(idleTimer);
+      cleanup();
       if (code === 0) {
         emit({ type: 'done', text: streamedAny ? '' : resultText });
         resolve();

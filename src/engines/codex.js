@@ -15,7 +15,7 @@
 // the agent to point it at a real project.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { readFile, unlink } from 'node:fs/promises';
+import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { existsSync, mkdirSync, symlinkSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -110,10 +110,27 @@ function buildPrompt(messages, system) {
   return p;
 }
 
-export async function chat({ messages, system, options }, emit) {
+// Write base64 data-URL images to temp files so `codex exec -i <file>` can
+// attach them to the prompt as vision input. Returns the paths (caller cleans up).
+async function writeImages(images, tag) {
+  const files = [];
+  for (let i = 0; i < (images?.length || 0); i++) {
+    const m = /^data:([^;]+);base64,(.+)$/s.exec(images[i]?.dataUrl || '');
+    if (!m) continue;
+    const ext = (m[1].split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '').slice(0, 5) || 'png';
+    const file = path.join(os.tmpdir(), `chatpanel-codex-img-${tag}-${i}.${ext}`);
+    await writeFile(file, Buffer.from(m[2], 'base64'));
+    files.push(file);
+  }
+  return files;
+}
+
+export async function chat({ messages, system, options, images }, emit) {
   ensureScratch();
   const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const outFile = path.join(os.tmpdir(), `chatpanel-codex-${tag}.txt`);
+  const imageFiles = await writeImages(images, tag);
+  const cleanupImages = () => imageFiles.forEach((f) => unlink(f).catch(() => {}));
 
   const cwd = options.workingDir ? path.resolve(options.workingDir) : SCRATCH;
   const sandbox =
@@ -130,6 +147,7 @@ export async function chat({ messages, system, options }, emit) {
   args.push('-c', 'approval_policy=never');
   if (REASONING) args.push('-c', `model_reasoning_effort=${REASONING}`);
   if (options.model) args.push('-m', options.model);
+  for (const f of imageFiles) args.push('-i', f); // attach images to the initial prompt
   args.push('-');
 
   // Default: use the user's skills/config. Opt-out → isolated home.
@@ -145,6 +163,7 @@ export async function chat({ messages, system, options }, emit) {
     try {
       child = spawn('codex', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env });
     } catch (e) {
+      cleanupImages();
       return reject(new Error(`Failed to start codex: ${e.message}`));
     }
 
@@ -178,6 +197,7 @@ export async function chat({ messages, system, options }, emit) {
     child.stderr.on('data', (d) => { armIdle(); stderr += d.toString(); });
     child.on('error', (e) => {
       clearTimeout(idleTimer);
+      cleanupImages();
       reject(e);
     });
     child.on('close', async (code) => {
@@ -189,6 +209,7 @@ export async function chat({ messages, system, options }, emit) {
         /* no message file */
       }
       unlink(outFile).catch(() => {});
+      cleanupImages();
       if (code === 0) {
         emit({ type: 'delta', text: text || '(no output)' });
         emit({ type: 'done', text: '' });

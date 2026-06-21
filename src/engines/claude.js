@@ -14,9 +14,26 @@
 // permissionMode is 'acceptEdits'/'bypassPermissions' in ChatPanel Settings.
 
 import { spawn } from 'node:child_process';
+import { writeFile, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { resolveClaude, buildSpawnSpec, isCompiledBinary } from '../env.js';
+
+// Write base64 data-URL images to temp files. Claude Code reads them with its
+// Read tool (which feeds images to the model as vision), so we just reference the
+// paths in the prompt — no custom image flag needed. Returns paths (caller cleans).
+async function writeImages(images, tag) {
+  const files = [];
+  for (let i = 0; i < (images?.length || 0); i++) {
+    const m = /^data:([^;]+);base64,(.+)$/s.exec(images[i]?.dataUrl || '');
+    if (!m) continue;
+    const ext = (m[1].split('/')[1] || 'png').replace(/[^a-z0-9]/gi, '').slice(0, 5) || 'png';
+    const file = path.join(os.tmpdir(), `chatpanel-claude-img-${tag}-${i}.${ext}`);
+    await writeFile(file, Buffer.from(m[2], 'base64'));
+    files.push(file);
+  }
+  return files;
+}
 
 // Idle timeout: kill the run only after this long with NO output. The timer
 // re-arms on every stdout/stderr chunk, so a task that keeps streaming can run
@@ -173,7 +190,7 @@ export function handleMessage(msg, emit, alreadyStreamed) {
   return out;
 }
 
-export async function chat({ messages, system, options }, emit) {
+export async function chat({ messages, system, options, images }, emit) {
   const permissionMode = options.permissionMode || 'default';
   // Explicit project dir, else null → CLI runs in home (or WSL home).
   const cwd = options.workingDir ? path.resolve(options.workingDir) : null;
@@ -194,10 +211,29 @@ export async function chat({ messages, system, options }, emit) {
   // "Use my local skills & config" off → run clean.
   if (options.useLocalConfig === false) args.push('--setting-sources', '');
 
-  const run = runClaude({ prompt: buildPrompt(messages), args, cwd, emit });
-  if (run === null) return sdkChat({ messages, system, options }, emit); // no CLI → SDK
-  const { streamedAny, resultText } = await run;
-  emit({ type: 'done', text: streamedAny ? '' : resultText });
+  // Attach images by writing them to temp files and asking Claude Code to Read
+  // them — its Read tool loads images as vision (no special flag needed).
+  const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const imageFiles = await writeImages(images, tag);
+  const cleanup = () => imageFiles.forEach((f) => unlink(f).catch(() => {}));
+  let prompt = buildPrompt(messages);
+  if (imageFiles.length) {
+    prompt += `\n\nThe user attached ${imageFiles.length} image file(s). Use the Read tool to view ${
+      imageFiles.length === 1 ? 'it' : 'them'
+    }: ${imageFiles.join(', ')}`;
+  }
+
+  const run = runClaude({ prompt, args, cwd, emit });
+  if (run === null) {
+    cleanup(); // SDK fallback doesn't take images yet
+    return sdkChat({ messages, system, options }, emit);
+  }
+  try {
+    const { streamedAny, resultText } = await run;
+    emit({ type: 'done', text: streamedAny ? '' : resultText });
+  } finally {
+    cleanup();
+  }
 }
 
 // A fast, tool-free single-shot completion — used for prompt autocomplete. No
