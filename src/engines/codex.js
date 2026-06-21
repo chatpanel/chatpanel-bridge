@@ -110,6 +110,29 @@ function buildPrompt(messages, system) {
   return p;
 }
 
+export function codexMcpConfigArgs(mcp) {
+  if (!mcp?.url) return [];
+  const name = mcp.serverName || 'chatpanel_browser';
+  const { command, args: pargs } = selfMcpStdio(mcp.url);
+  const args = [
+    '-c',
+    `mcp_servers.${name}.command=${JSON.stringify(command)}`,
+    '-c',
+    `mcp_servers.${name}.args=${JSON.stringify(pargs)}`,
+    '-c',
+    `mcp_servers.${name}.default_tools_approval_mode="approve"`,
+    '-c',
+    `mcp_servers.${name}.startup_timeout_sec=30`,
+    '-c',
+    `mcp_servers.${name}.tool_timeout_sec=120`,
+  ];
+  const toolNames = [...new Set((mcp.specs || []).map((s) => s?.name).filter(Boolean))];
+  if (toolNames.length) {
+    args.push('-c', `mcp_servers.${name}.enabled_tools=${JSON.stringify(toolNames)}`);
+  }
+  return args;
+}
+
 // Write base64 data-URL images to temp files so `codex exec -i <file>` can
 // attach them to the prompt as vision input. Returns the paths (caller cleans up).
 async function writeImages(images, tag) {
@@ -149,12 +172,7 @@ export async function chat({ messages, system, options, images }, emit) {
   // Browser tools: register the bridge's MCP server as a stdio MCP server (the
   // bridge binary in --mcp-stdio mode), so Codex can call our page-action tools.
   // `-c key=value` parses value as TOML; JSON.stringify yields valid TOML here.
-  if (options.mcp?.url) {
-    const name = options.mcp.serverName || 'chatpanel_browser';
-    const { command, args: pargs } = selfMcpStdio(options.mcp.url);
-    args.push('-c', `mcp_servers.${name}.command=${JSON.stringify(command)}`);
-    args.push('-c', `mcp_servers.${name}.args=${JSON.stringify(pargs)}`);
-  }
+  args.push(...codexMcpConfigArgs(options.mcp));
   if (options.model) args.push('-m', options.model);
   if (options.extraArgs) args.push(...String(options.extraArgs).split(/\s+/).filter(Boolean));
   for (const f of imageFiles) args.push('-i', f); // attach images to the initial prompt

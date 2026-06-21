@@ -16,7 +16,7 @@
 //                      speak it), reusing the Claude engine's parser.
 
 import { spawn } from 'node:child_process';
-import { writeFile, unlink } from 'node:fs/promises';
+import { readFile, writeFile, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { resolveCommand, buildSpawnSpec, selfMcpStdio } from '../env.js';
@@ -64,6 +64,7 @@ const IDLE_MS = Number(process.env.CHATPANEL_CUSTOM_TIMEOUT_MS) || 180_000;
 // also set NO_COLOR on the child env, but this is the robust backstop.)
 const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 const stripAnsi = (s) => s.replace(ANSI_RE, '');
+const OPENCODE_STABLE_MCP_URL = 'http://127.0.0.1:4319/mcp';
 
 export async function available() {
   // The engine ships in every bridge; individual custom agents are user-defined
@@ -138,6 +139,120 @@ function buildPrompt(messages, system) {
   return p;
 }
 
+function mcpToolSpecs(mcp) {
+  return (mcp?.specs || []).filter((s) => s?.name);
+}
+
+function jsIdentifier(name, index) {
+  const id = String(name).replace(/[^A-Za-z0-9_$]/g, '_');
+  return /^[A-Za-z_$]/.test(id) ? id : `tool_${index}_${id}`;
+}
+
+export function piToolArgs(extensionFile, mcp) {
+  return ['--extension', extensionFile];
+}
+
+export function buildPiExtensionSource(mcp) {
+  const specs = mcpToolSpecs(mcp);
+  const declarations = specs.map((spec, index) => {
+    const id = jsIdentifier(spec.name, index);
+    const schema = spec.parameters || { type: 'object', properties: {} };
+    return `const ${id}Tool = {
+  name: ${JSON.stringify(spec.name)},
+  label: ${JSON.stringify(spec.name)},
+  description: ${JSON.stringify(spec.description || spec.name)},
+  parameters: ${JSON.stringify(schema)},
+  async execute(toolCallId, params, signal) {
+    return callMcpTool(${JSON.stringify(spec.name)}, toolCallId, params, signal);
+  },
+};`;
+  }).join('\n\n');
+  const registrations = specs.map((spec, index) => {
+    const id = jsIdentifier(spec.name, index);
+    return `  pi.registerTool(${id}Tool);`;
+  }).join('\n');
+
+  return `import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+const MCP_URL = ${JSON.stringify(mcp.url)};
+
+function contentFromDataUrl(dataUrl) {
+  const match = /^data:([^;]+);base64,(.+)$/s.exec(String(dataUrl || ""));
+  return match ? { type: "image", data: match[2], mimeType: match[1] } : null;
+}
+
+function normalizeContent(content) {
+  const out = [];
+  for (const item of Array.isArray(content) ? content : []) {
+    if (item?.type === "text") {
+      out.push({ type: "text", text: String(item.text ?? "") });
+    } else if (item?.type === "image" && item.data) {
+      out.push({ type: "image", data: String(item.data), mimeType: String(item.mimeType || "image/png") });
+    } else if (typeof item?.image === "string") {
+      const img = contentFromDataUrl(item.image);
+      if (img) out.push(img);
+      if (item.text) out.push({ type: "text", text: String(item.text) });
+    }
+  }
+  return out.length ? out : [{ type: "text", text: "ok" }];
+}
+
+async function callMcpTool(toolName, toolCallId, params, signal) {
+  const response = await fetch(MCP_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: toolCallId || String(Date.now()),
+      method: "tools/call",
+      params: { name: toolName, arguments: params || {} },
+    }),
+    signal,
+  });
+  const message = await response.json();
+  if (message.error) {
+    return {
+      content: [{ type: "text", text: \`error: \${message.error.message || JSON.stringify(message.error)}\` }],
+      details: { error: message.error },
+    };
+  }
+  return {
+    content: normalizeContent(message.result?.content),
+    details: message.result ?? {},
+  };
+}
+
+${declarations}
+
+export default function (pi: ExtensionAPI) {
+${registrations}
+}
+`;
+}
+
+async function writePiExtension(mcp, tag) {
+  const file = path.join(os.tmpdir(), `chatpanel-pi-tools-${tag}.ts`);
+  await writeFile(file, buildPiExtensionSource(mcp));
+  return file;
+}
+
+async function opencodeHasStableMcpConfig() {
+  const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
+  const files = [
+    path.join(configHome, 'opencode', 'opencode.jsonc'),
+    path.join(os.homedir(), 'Library', 'Application Support', 'opencode', 'opencode.jsonc'),
+  ];
+  for (const file of files) {
+    try {
+      const text = await readFile(file, 'utf8');
+      if (text.includes(OPENCODE_STABLE_MCP_URL)) return true;
+    } catch {
+      /* missing config is fine */
+    }
+  }
+  return false;
+}
+
 export async function chat({ messages, system, options, images }, emit) {
   // Pro gate — verified, not just UI. No valid signed entitlement → no run.
   if (!(await isProEntitled(options.entitlement))) {
@@ -201,7 +316,11 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
   // config file (spec.mcpArg, e.g. "--mcp-config {file}"), write a standard
   // mcpServers JSON pointing at the bridge's stdio MCP proxy and inject the flag.
   // Covers any CLI that reads the de-facto {mcpServers:{name:{command,args}}} shape.
-  if (options.mcp?.url && spec.mcpArg) {
+  if (options.mcp?.url && spec.toolAdapter === 'pi-extension') {
+    const extensionFile = await writePiExtension(options.mcp, tag);
+    mcpFiles.push(extensionFile);
+    args = [...piToolArgs(extensionFile, options.mcp), ...args];
+  } else if (options.mcp?.url && spec.mcpArg) {
     const name = options.mcp.serverName || 'chatpanel_browser';
     const { command, args: pargs } = selfMcpStdio(options.mcp.url);
     const cfgFile = path.join(os.tmpdir(), `chatpanel-mcp-${tag}.json`);
@@ -217,6 +336,12 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
   // never a per-run/project file — so we can't inject it here. opencode reaches
   // the browser tools via the bridge's STABLE /mcp endpoint, registered once with
   // `opencode mcp add chatpanel --url http://127.0.0.1:4319/mcp`.
+  if (options.mcp?.url && spec.requiresStableMcp && !(await opencodeHasStableMcpConfig())) {
+    emit({
+      type: 'status',
+      text: `OpenCode needs one-time browser-tool setup: opencode mcp add chatpanel --url ${OPENCODE_STABLE_MCP_URL}`,
+    });
+  }
 
   const imageTokens = imageTokensFor(spec.imageArg, imageFiles);
   let placedImages = false;

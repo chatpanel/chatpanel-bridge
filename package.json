@@ -34,6 +34,7 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "test": "node --test tests/*.test.mjs",
     "build:bin": "bash scripts/build-binaries.sh"
   },
   "dependencies": {},
