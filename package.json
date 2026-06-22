@@ -1,6 +1,6 @@
 {
   "name": "@chatpanel/bridge",
-  "version": "0.10.3",
+  "version": "0.10.4",
   "type": "module",
   "description": "Local bridge that exposes the AI coding agents installed on your machine — Claude Code (CLI), Codex (CLI), and Gemini CLI — to the ChatPanel Chrome extension over a localhost SSE endpoint. Bring your own agent.",
   "keywords": [
