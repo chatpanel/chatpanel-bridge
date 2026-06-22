@@ -22,6 +22,7 @@ import path from 'node:path';
 import { resolveCommand, buildSpawnSpec, selfMcpStdio } from '../env.js';
 import { isProEntitled } from '../entitlement.js';
 import { handleMessage } from './claude.js';
+import { buildCliPrompt } from './prompt.js';
 
 // Write base64 data-URL images to temp files so a custom CLI can take them via
 // its configured `imageArg` template (e.g. "-i {path}", "@{path}"). Returns paths.
@@ -123,20 +124,6 @@ export async function listSpecModels(command, listModelsArgs, workingDir) {
     try { child.stdin.end(); } catch { /* some CLIs don't read stdin */ }
   });
   return parseModelList(stdout);
-}
-
-// The bridge is stateless, so replay the conversation as a single prompt.
-function buildPrompt(messages, system) {
-  let p = system ? `${system}\n\n` : '';
-  const history = messages.slice(0, -1);
-  const last = messages[messages.length - 1];
-  if (history.length) {
-    p += 'Conversation so far:\n';
-    for (const m of history) p += `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}\n\n`;
-    p += '---\n\n';
-  }
-  p += last ? last.content : '';
-  return p;
 }
 
 function mcpToolSpecs(mcp) {
@@ -272,7 +259,7 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
     throw new Error(`Couldn't find "${spec.command}". Enter its full path, or install it on your PATH (or in WSL).`);
   }
 
-  const prompt = buildPrompt(messages, system);
+  const prompt = buildCliPrompt(messages, system);
   let cwd = options.workingDir ? path.resolve(options.workingDir) : null;
   const label = spec.label || spec.command;
   const fmt = ['claude-stream-json', 'opencode-json'].includes(spec.format) ? spec.format : 'text';

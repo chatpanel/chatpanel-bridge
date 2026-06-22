@@ -18,6 +18,7 @@ import { writeFile, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { resolveClaude, buildSpawnSpec, isCompiledBinary, selfMcpStdio } from '../env.js';
+import { buildCliPrompt } from './prompt.js';
 
 // Write base64 data-URL images to temp files. Claude Code reads them with its
 // Read tool (which feeds images to the model as vision), so we just reference the
@@ -77,20 +78,6 @@ export async function available() {
 // can still type any model string (e.g. claude-opus-4-8).
 export async function listModels() {
   return ['opus', 'sonnet', 'haiku'];
-}
-
-// The bridge is stateless, so we replay the conversation as a single prompt.
-function buildPrompt(messages) {
-  const history = messages.slice(0, -1);
-  const last = messages[messages.length - 1];
-  let prompt = '';
-  if (history.length) {
-    prompt += 'Conversation so far:\n';
-    for (const m of history) prompt += `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}\n\n`;
-    prompt += '---\n\n';
-  }
-  prompt += last ? last.content : '';
-  return prompt;
 }
 
 export function claudeMcpConfig(mcp) {
@@ -250,7 +237,7 @@ export async function chat({ messages, system, options, images }, emit) {
     imageFiles.forEach((f) => unlink(f).catch(() => {}));
     mcpFiles.forEach((f) => unlink(f).catch(() => {}));
   };
-  let prompt = buildPrompt(messages);
+  let prompt = buildCliPrompt(messages);
   if (imageFiles.length) {
     prompt += `\n\nThe user attached ${imageFiles.length} image file(s). Use the Read tool to view ${
       imageFiles.length === 1 ? 'it' : 'them'
@@ -336,7 +323,7 @@ async function sdkChat({ messages, system, options }, emit) {
   let streamedAny = false;
   let resultText = '';
   const iterator = query({
-    prompt: buildPrompt(messages),
+    prompt: buildCliPrompt(messages),
     options: {
       cwd,
       permissionMode,

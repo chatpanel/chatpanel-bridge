@@ -20,6 +20,7 @@ import { existsSync, mkdirSync, symlinkSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin, selfMcpStdio } from '../env.js';
+import { buildCliPrompt } from './prompt.js';
 
 // Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
 // streaming never trips it — only true silence does. Override with
@@ -95,19 +96,6 @@ export async function available() {
   return installed
     ? { ok: true }
     : { ok: false, reason: 'codex not found on PATH. Install it and run `codex login`.' };
-}
-
-function buildPrompt(messages, system) {
-  let p = system ? `${system}\n\n` : '';
-  const history = messages.slice(0, -1);
-  const last = messages[messages.length - 1];
-  if (history.length) {
-    p += 'Conversation so far:\n';
-    for (const m of history) p += `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}\n\n`;
-    p += '---\n\n';
-  }
-  p += last ? last.content : '';
-  return p;
 }
 
 export function codexMcpConfigArgs(mcp) {
@@ -247,7 +235,7 @@ export async function chat({ messages, system, options, images }, emit) {
       }
     });
 
-    child.stdin.write(buildPrompt(messages, system));
+    child.stdin.write(buildCliPrompt(messages, system));
     child.stdin.end();
   });
 }

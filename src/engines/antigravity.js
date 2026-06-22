@@ -15,6 +15,7 @@ import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin } from '../env.js';
+import { buildCliPrompt } from './prompt.js';
 
 const IDLE_MS = Number(process.env.CHATPANEL_AGY_TIMEOUT_MS) || 180_000;
 const SCRATCH = path.join(os.tmpdir(), 'chatpanel-agy-scratch');
@@ -77,20 +78,6 @@ function writeImages(images, dir) {
   return files;
 }
 
-// The bridge is stateless, so replay the conversation as a single prompt.
-function buildPrompt(messages, system) {
-  let p = system ? `${system}\n\n` : '';
-  const history = messages.slice(0, -1);
-  const last = messages[messages.length - 1];
-  if (history.length) {
-    p += 'Conversation so far:\n';
-    for (const m of history) p += `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}\n\n`;
-    p += '---\n\n';
-  }
-  p += last ? last.content : '';
-  return p;
-}
-
 export async function chat({ messages, system, options, images }, emit) {
   try {
     mkdirSync(SCRATCH, { recursive: true });
@@ -104,7 +91,7 @@ export async function chat({ messages, system, options, images }, emit) {
   // read-tool approval is needed in headless `-p` mode. (Confirmed working.)
   const imageFiles = writeImages(images, cwd);
   const cleanup = () => imageFiles.forEach((f) => { try { unlinkSync(f); } catch { /* gone */ } });
-  let prompt = buildPrompt(messages, system);
+  let prompt = buildCliPrompt(messages, system);
   if (imageFiles.length) {
     prompt += `\n\nThe user attached image(s): ${imageFiles.map((f) => '@' + path.basename(f)).join(' ')}`;
   }
