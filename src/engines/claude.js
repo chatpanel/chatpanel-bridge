@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { writeFile, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { resolveClaude, buildSpawnSpec, isCompiledBinary } from '../env.js';
+import { resolveClaude, buildSpawnSpec, isCompiledBinary, selfMcpStdio } from '../env.js';
 
 // Write base64 data-URL images to temp files. Claude Code reads them with its
 // Read tool (which feeds images to the model as vision), so we just reference the
@@ -91,6 +91,18 @@ function buildPrompt(messages) {
   }
   prompt += last ? last.content : '';
   return prompt;
+}
+
+export function claudeMcpConfig(mcp) {
+  if (!mcp?.url || !Array.isArray(mcp.specs) || !mcp.specs.length) return null;
+  const serverName = mcp.serverName || 'chatpanel_browser';
+  const { command, args } = selfMcpStdio(mcp.url);
+  const toolNames = [...new Set(mcp.specs.map((s) => s?.name).filter(Boolean))];
+  return {
+    serverName,
+    config: { mcpServers: { [serverName]: { command, args } } },
+    allowedTools: toolNames.map((name) => `mcp__${serverName}__${name}`),
+  };
 }
 
 // Spawn claude (however it resolves) and stream its stream-json output via
@@ -198,19 +210,20 @@ export async function chat({ messages, system, options, images }, emit) {
   const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const args = ['--print', '--output-format', 'stream-json', '--include-partial-messages', '--verbose'];
 
-  // Browser-tools relay: ChatPanel hands this CLI the page-action tools over an
-  // HTTP MCP server the bridge hosts (which relays each call to the extension).
+  // Browser-tools relay: ChatPanel hands this CLI the page-action tools through
+  // the bridge's stdio MCP proxy, which forwards each call to the per-chat HTTP
+  // MCP session and then to the extension.
   // options.mcp = { url, serverName, specs }. We pre-allow the tools so a headless
   // run doesn't block on approval, and merge alongside the user's own MCP servers.
   const mcpFiles = [];
   const mcpAllow = [];
-  if (options.mcp?.url && Array.isArray(options.mcp.specs) && options.mcp.specs.length) {
-    const serverName = options.mcp.serverName || 'chatpanel_browser';
+  const mcpConfig = claudeMcpConfig(options.mcp);
+  if (mcpConfig) {
     const cfgFile = path.join(os.tmpdir(), `chatpanel-mcp-${tag}.json`);
-    await writeFile(cfgFile, JSON.stringify({ mcpServers: { [serverName]: { type: 'http', url: options.mcp.url } } }));
+    await writeFile(cfgFile, JSON.stringify(mcpConfig.config));
     mcpFiles.push(cfgFile);
     args.push('--mcp-config', cfgFile);
-    for (const s of options.mcp.specs) mcpAllow.push(`mcp__${serverName}__${s.name}`);
+    mcpAllow.push(...mcpConfig.allowedTools);
   }
 
   // Gate writes/shell behind the chosen mode; otherwise restrict to read-only

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { claudeMcpConfig } from '../src/engines/claude.js';
 import { codexMcpConfigArgs } from '../src/engines/codex.js';
 import { buildPiExtensionSource, piToolArgs } from '../src/engines/custom.js';
 
@@ -36,6 +37,21 @@ test('Codex browser MCP config pre-approves relayed page tools', () => {
   assert(args.includes('mcp_servers.chatpanel_browser.startup_timeout_sec=30'));
   assert(args.includes('mcp_servers.chatpanel_browser.tool_timeout_sec=120'));
   assert(args.includes('mcp_servers.chatpanel_browser.enabled_tools=["browser_click","browser_snapshot"]'));
+});
+
+test('Claude browser MCP config uses the bridge stdio proxy and pre-allows page tools', () => {
+  const cfg = claudeMcpConfig(mcp);
+  const server = cfg.config.mcpServers.chatpanel_browser;
+
+  assert.equal(server.type, undefined);
+  assert.equal(server.url, undefined);
+  assert.equal(typeof server.command, 'string');
+  assert(server.args.includes('--mcp-stdio'));
+  assert(server.args.includes(mcp.url));
+  assert.deepEqual(cfg.allowedTools, [
+    'mcp__chatpanel_browser__browser_click',
+    'mcp__chatpanel_browser__browser_snapshot',
+  ]);
 });
 
 test('Pi browser tool extension registers page tools and relays calls over MCP', () => {
