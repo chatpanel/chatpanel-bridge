@@ -67,7 +67,7 @@ function shellWhich(name) {
   if (process.platform === 'win32') return '';
   try {
     const shell = process.env.SHELL || '/bin/zsh';
-    const r = spawnSync(shell, ['-ilc', `command -v ${name} 2>/dev/null`], {
+    const r = spawnSync(shell, ['-lc', `command -v ${name} 2>/dev/null`], {
       encoding: 'utf8',
       timeout: 4000,
     });
@@ -319,7 +319,7 @@ export function enrichPath() {
   let shellPath = '';
   try {
     const shell = process.env.SHELL || '/bin/zsh';
-    const r = spawnSync(shell, ['-ilc', 'command -p echo "$PATH"'], {
+    const r = spawnSync(shell, ['-lc', 'command -p echo "$PATH"'], {
       encoding: 'utf8',
       timeout: 4000,
     });
