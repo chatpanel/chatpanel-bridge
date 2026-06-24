@@ -14,7 +14,7 @@ let enriched = false;
 
 // The agent CLIs the bridge shells out to. Claude has its own richer resolution
 // (resolveClaude: native / cli.js / WSL / SDK) below.
-const AGENT_CLIS = ['codex', 'claude', 'agy', 'pi', 'opencode', 'kiro-cli'];
+export const AGENT_CLIS = ['codex', 'claude', 'agy', 'pi', 'opencode', 'kiro-cli'];
 
 // Is `name` executable somewhere on the current PATH?
 function onPath(name) {
@@ -36,6 +36,9 @@ export function findAgentBin(name) {
       const p = path.join(d, name + ext);
       if (existsSync(p)) return p;
     }
+  }
+  for (const p of agentCandidateBins(name, os.homedir())) {
+    if (existsSync(p)) return p;
   }
   return shellWhich(name) || null;
 }
@@ -290,6 +293,63 @@ function versionManagerBins(home) {
   return bins;
 }
 
+export function agentInstallDirs(home) {
+  return [
+    path.join(home, '.local', 'bin'),
+    path.join(home, '.opencode', 'bin'),
+    path.join(home, '.codex', 'bin'),
+    path.join(home, '.claude', 'bin'),
+    path.join(home, '.claude', 'local', 'bin'),
+  ];
+}
+
+function claudeNativeBins(home) {
+  const versionsDir = path.join(home, '.local', 'share', 'claude', 'versions');
+  let versions = [];
+  try {
+    versions = readdirSync(versionsDir)
+      .filter((v) => /^\d+\.\d+\.\d+/.test(v))
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true }));
+  } catch {
+    /* native installer may not be present */
+  }
+  return versions.map((v) => path.join(versionsDir, v));
+}
+
+export function agentCandidateBins(name, home = os.homedir()) {
+  const local = path.join(home, '.local', 'bin', name);
+  const map = {
+    claude: [
+      local,
+      path.join(home, '.claude', 'bin', 'claude'),
+      path.join(home, '.claude', 'local', 'claude'),
+      path.join(home, '.claude', 'local', 'bin', 'claude'),
+      ...claudeNativeBins(home),
+    ],
+    codex: [
+      local,
+      path.join(home, '.codex', 'bin', 'codex'),
+    ],
+    agy: [
+      local,
+      '/Applications/Antigravity.app/Contents/MacOS/agy',
+      '/Applications/Antigravity IDE.app/Contents/MacOS/agy',
+    ],
+    pi: [
+      local,
+    ],
+    opencode: [
+      path.join(home, '.opencode', 'bin', 'opencode'),
+      local,
+    ],
+    'kiro-cli': [
+      local,
+      '/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli',
+    ],
+  };
+  return [...new Set(map[name] || [local])];
+}
+
 export function enrichPath() {
   if (enriched || process.platform === 'win32') {
     enriched = true;
@@ -312,7 +372,7 @@ export function enrichPath() {
     path.join(home, '.cargo', 'bin'),
     path.join(home, '.deno', 'bin'),
     path.join(home, '.bun', 'bin'),
-    path.join(home, '.opencode', 'bin'),
+    ...agentInstallDirs(home),
     ...versionManagerBins(home),
   ];
 

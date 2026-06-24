@@ -23,7 +23,7 @@ import * as antigravity from './engines/antigravity.js';
 import { pi, opencode, kiro } from './engines/cli-agents.js';
 import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
-import { enrichPath, findAgentBin, resolveCommand } from './env.js';
+import { AGENT_CLIS, enrichPath, findAgentBin, resolveCommand } from './env.js';
 import { checkForUpdate, selfUpdate } from './update.js';
 import { callLocalMcp } from './mcp-local.js';
 
@@ -438,8 +438,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, {
         version: VERSION,
         home: os.homedir(),
-        codex: findAgentBin('codex') || null,
-        agy: findAgentBin('agy') || null,
+        agents: Object.fromEntries(AGENT_CLIS.map((name) => [name, findAgentBin(name) || null])),
         path: process.env.PATH,
       });
     }
