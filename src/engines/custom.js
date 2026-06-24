@@ -155,6 +155,12 @@ export function stableMcpSetupCommand(spec = {}) {
   return `opencode mcp add chatpanel --url ${CHATPANEL_STABLE_MCP_URL}`;
 }
 
+export function stableMcpSetupPlan(spec = {}) {
+  const args = Array.isArray(spec.stableMcpSetupArgs) ? spec.stableMcpSetupArgs.filter((a) => a != null).map(String) : null;
+  if (!args?.length) return null;
+  return { command: spec.stableMcpSetupCommandName || spec.command, args };
+}
+
 export function buildPiExtensionSource(mcp) {
   const specs = mcpToolSpecs(mcp);
   const declarations = specs.map((spec, index) => {
@@ -256,25 +262,27 @@ async function opencodeHasStableMcpConfig() {
   return false;
 }
 
-async function commandStdout(command, args, cwd) {
+export async function commandOutput(command, args, cwd) {
   const resolved = resolveCommand(command);
   if (!resolved) return '';
   const [bin, argv, opts] = buildSpawnSpec(resolved, args, cwd || null);
   return new Promise((resolve) => {
     const child = spawn(bin, argv, opts);
     let out = '';
+    let err = '';
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
-      resolve(out);
+      resolve(out + err);
     }, 4000);
     child.stdout.on('data', (d) => (out += d.toString()));
+    child.stderr.on('data', (d) => (err += d.toString()));
     child.on('error', () => {
       clearTimeout(timer);
-      resolve('');
+      resolve(out + err);
     });
     child.on('close', () => {
       clearTimeout(timer);
-      resolve(out);
+      resolve(out + err);
     });
     try { child.stdin.end(); } catch { /* ignore */ }
   });
@@ -282,7 +290,7 @@ async function commandStdout(command, args, cwd) {
 
 async function kiroHasStableMcpConfig(command, cwd) {
   for (const scope of ['workspace', 'global', 'default']) {
-    const out = await commandStdout(command, ['mcp', 'list', scope], cwd);
+    const out = await commandOutput(command, ['mcp', 'list', scope], cwd);
     if (out.includes(CHATPANEL_STABLE_MCP_URL) || /chatpanel_browser/i.test(out)) return true;
   }
   return false;
@@ -292,6 +300,59 @@ async function hasStableMcpConfig(spec, cwd) {
   if (spec.stableMcpConfigCheck === 'kiro') return kiroHasStableMcpConfig(spec.command || 'kiro-cli', cwd);
   if (spec.stableMcpConfigCheck === 'opencode') return opencodeHasStableMcpConfig();
   return false;
+}
+
+async function runStableMcpSetup(plan, cwd) {
+  const resolved = resolveCommand(plan.command);
+  if (!resolved) throw new Error(`Couldn't find "${plan.command}" to set up browser tools.`);
+  const [bin, argv, opts] = buildSpawnSpec(resolved, plan.args, cwd || null);
+  opts.env = { ...(opts.env || process.env), NO_COLOR: '1', FORCE_COLOR: '0', CLICOLOR: '0', TERM: 'dumb' };
+  await new Promise((resolve, reject) => {
+    let child;
+    try { child = spawn(bin, argv, opts); } catch (e) { return reject(new Error(`Failed to start ${plan.command}: ${e.message}`)); }
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      reject(new Error(`${plan.command} MCP setup timed out.`));
+    }, 20_000);
+    child.stderr.on('data', (d) => (stderr += d.toString()));
+    child.on('error', (e) => {
+      clearTimeout(timer);
+      reject(new Error(`Failed to start ${plan.command}: ${e.message}`));
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve();
+      reject(new Error(`${plan.command} MCP setup exited ${code}: ${stderr.trim().split('\n').pop() || 'failed'}`));
+    });
+    try { child.stdin.end(); } catch { /* ignore */ }
+  });
+}
+
+export async function ensureStableMcpConfig(spec, cwd, label, emit, deps = {}) {
+  if (!spec.requiresStableMcp) return true;
+  const hasConfig = deps.hasConfig || hasStableMcpConfig;
+  const runSetup = deps.runSetup || runStableMcpSetup;
+  if (await hasConfig(spec, cwd)) return true;
+
+  const setupCommand = stableMcpSetupCommand(spec);
+  if (!spec.autoSetupStableMcp) {
+    const text = `${label} needs one-time browser-tool setup: ${setupCommand}`;
+    emit({ type: 'status', text });
+    throw new Error(text);
+  }
+
+  const plan = stableMcpSetupPlan(spec);
+  if (!plan?.command) {
+    const text = `${label} needs one-time browser-tool setup: ${setupCommand}`;
+    emit({ type: 'status', text });
+    throw new Error(text);
+  }
+
+  emit({ type: 'status', text: `${label} is setting up one-time browser tools...` });
+  await runSetup(plan, cwd);
+  if (await hasConfig(spec, cwd)) return true;
+  throw new Error(`${label} browser-tool setup completed, but the MCP server is still not visible. Run: ${setupCommand}`);
 }
 
 export async function chat({ messages, system, options, images }, emit) {
@@ -376,16 +437,9 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
   if (options.mcp?.url && spec.trustToolsArg) {
     args.push(...trustToolArgs(spec.trustToolsArg, options.mcp));
   }
-  // NOTE: opencode only loads MCP from its GLOBAL config (~/.config/opencode),
-  // never a per-run/project file — so we can't inject it here. opencode reaches
-  // the browser tools via the bridge's STABLE /mcp endpoint, registered once with
-  // `opencode mcp add chatpanel --url http://127.0.0.1:4319/mcp`.
-  if (options.mcp?.url && spec.requiresStableMcp && !(await hasStableMcpConfig(spec, cwd))) {
-    emit({
-      type: 'status',
-      text: `${label} needs one-time browser-tool setup: ${stableMcpSetupCommand(spec)}`,
-    });
-  }
+  // Some CLIs only load MCP from their persistent config, so ensure that stable
+  // /mcp endpoint is present before letting the agent answer with no tools.
+  if (options.mcp?.url) await ensureStableMcpConfig(spec, cwd, label, emit);
 
   const imageTokens = imageTokensFor(spec.imageArg, imageFiles);
   let placedImages = false;

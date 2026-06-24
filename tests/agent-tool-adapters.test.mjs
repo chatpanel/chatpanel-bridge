@@ -6,7 +6,10 @@ import { claudeMcpConfig } from '../src/engines/claude.js';
 import { codexMcpConfigArgs } from '../src/engines/codex.js';
 import {
   buildPiExtensionSource,
+  commandOutput,
+  ensureStableMcpConfig,
   piToolArgs,
+  stableMcpSetupPlan,
   stableMcpSetupCommand,
   trustToolArgs,
 } from '../src/engines/custom.js';
@@ -77,14 +80,61 @@ test('Pi tool args load the generated extension without disabling built-in tools
 
 test('Kiro uses stable MCP setup and trusts the current ChatPanel tools', () => {
   assert.equal(kiro.spec.requiresStableMcp, true);
+  assert.equal(kiro.spec.autoSetupStableMcp, true);
   assert.equal(kiro.spec.stableMcpConfigCheck, 'kiro');
   assert.equal(
     stableMcpSetupCommand(kiro.spec),
     'kiro-cli mcp add --scope global --name chatpanel_browser --url http://127.0.0.1:4319/mcp --force',
   );
+  assert.deepEqual(stableMcpSetupPlan(kiro.spec), {
+    command: 'kiro-cli',
+    args: ['mcp', 'add', '--scope', 'global', '--name', 'chatpanel_browser', '--url', 'http://127.0.0.1:4319/mcp', '--force'],
+  });
   assert.deepEqual(trustToolArgs(kiro.spec.trustToolsArg, mcp), [
     '--trust-tools=browser_click,browser_snapshot',
   ]);
+});
+
+test('Kiro auto-runs its one-time stable MCP setup when missing', async () => {
+  const statuses = [];
+  let setupRan = false;
+  let checks = 0;
+
+  await ensureStableMcpConfig(kiro.spec, null, 'Kiro', (event) => statuses.push(event.text), {
+    hasConfig: async () => ++checks > 1,
+    runSetup: async (plan) => {
+      setupRan = true;
+      assert.equal(plan.command, 'kiro-cli');
+      assert.deepEqual(plan.args.slice(0, 3), ['mcp', 'add', '--scope']);
+    },
+  });
+
+  assert.equal(setupRan, true);
+  assert.equal(checks, 2);
+  assert.match(statuses.join('\n'), /setting up one-time browser tools/);
+});
+
+test('Stable MCP agents without auto setup fail fast instead of running tool-less', async () => {
+  const spec = {
+    command: 'example-agent',
+    requiresStableMcp: true,
+    stableMcpSetupCommand: 'example-agent mcp add chatpanel',
+  };
+  const statuses = [];
+
+  await assert.rejects(
+    () => ensureStableMcpConfig(spec, null, 'Example', (event) => statuses.push(event.text), {
+      hasConfig: async () => false,
+      runSetup: async () => assert.fail('setup should not run for non-auto agents'),
+    }),
+    /Example needs one-time browser-tool setup: example-agent mcp add chatpanel/,
+  );
+  assert.match(statuses.join('\n'), /needs one-time browser-tool setup/);
+});
+
+test('Stable MCP config checks include stderr output from CLIs like Kiro', async () => {
+  const output = await commandOutput(process.execPath, ['-e', 'process.stderr.write("chatpanel_browser")'], null);
+  assert.equal(output, 'chatpanel_browser');
 });
 
 test('Custom stable-MCP agents are not treated as OpenCode by default', () => {
