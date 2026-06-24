@@ -150,6 +150,11 @@ export function trustToolArgs(template, mcp) {
     : [...tmpl.split(/\s+/).filter(Boolean), value];
 }
 
+export function mcpTrustArgs(spec = {}, mcp) {
+  if (spec.trustAllToolsForMcp) return [spec.trustAllToolsArg || '--trust-all-tools'];
+  return spec.trustToolsArg ? trustToolArgs(spec.trustToolsArg, mcp) : [];
+}
+
 export function stableMcpSetupCommand(spec = {}) {
   if (spec.stableMcpSetupCommand) return spec.stableMcpSetupCommand;
   return `opencode mcp add chatpanel --url ${CHATPANEL_STABLE_MCP_URL}`;
@@ -434,9 +439,7 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
       : [...tmpl.split(/\s+/).filter(Boolean), cfgFile];
     args = [...tokens, ...args];
   }
-  if (options.mcp?.url && spec.trustToolsArg) {
-    args.push(...trustToolArgs(spec.trustToolsArg, options.mcp));
-  }
+  if (options.mcp?.url) args.push(...mcpTrustArgs(spec, options.mcp));
   // Some CLIs only load MCP from their persistent config, so ensure that stable
   // /mcp endpoint is present before letting the agent answer with no tools.
   if (options.mcp?.url) await ensureStableMcpConfig(spec, cwd, label, emit);

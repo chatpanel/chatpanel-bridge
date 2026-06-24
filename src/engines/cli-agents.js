@@ -82,7 +82,10 @@ export const kiro = makeCliAgent(
     args: 'chat --no-interactive --require-mcp-startup',
     promptVia: 'arg',
     modelArg: '--model {model}',
-    trustToolsArg: '--trust-tools={tools}',
+    // Kiro can see MCP tools with --trust-tools, but in --no-interactive mode it
+    // only executes MCP calls when this broader trust flag is present.
+    trustAllToolsForMcp: true,
+    trustAllToolsArg: '--trust-all-tools',
     requiresStableMcp: true,
     autoSetupStableMcp: true,
     stableMcpConfigCheck: 'kiro',

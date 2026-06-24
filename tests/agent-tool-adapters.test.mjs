@@ -8,6 +8,7 @@ import {
   buildPiExtensionSource,
   commandOutput,
   ensureStableMcpConfig,
+  mcpTrustArgs,
   piToolArgs,
   stableMcpSetupPlan,
   stableMcpSetupCommand,
@@ -90,7 +91,8 @@ test('Kiro uses stable MCP setup and trusts the current ChatPanel tools', () => 
     command: 'kiro-cli',
     args: ['mcp', 'add', '--scope', 'global', '--name', 'chatpanel_browser', '--url', 'http://127.0.0.1:4319/mcp', '--force'],
   });
-  assert.deepEqual(trustToolArgs(kiro.spec.trustToolsArg, mcp), [
+  assert.deepEqual(mcpTrustArgs(kiro.spec, mcp), ['--trust-all-tools']);
+  assert.deepEqual(trustToolArgs('--trust-tools={tools}', mcp), [
     '--trust-tools=browser_click,browser_snapshot',
   ]);
 });
