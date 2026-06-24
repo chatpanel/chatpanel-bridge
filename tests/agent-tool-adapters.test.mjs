@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { claudeMcpConfig } from '../src/engines/claude.js';
 import { codexMcpConfigArgs } from '../src/engines/codex.js';
-import { buildPiExtensionSource, piToolArgs } from '../src/engines/custom.js';
+import {
+  buildPiExtensionSource,
+  piToolArgs,
+  stableMcpSetupCommand,
+  trustToolArgs,
+} from '../src/engines/custom.js';
+import { kiro } from '../src/engines/cli-agents.js';
 
 const mcp = {
   url: 'http://127.0.0.1:4319/mcp/session-1',
@@ -66,4 +73,21 @@ test('Pi browser tool extension registers page tools and relays calls over MCP',
 
 test('Pi tool args load the generated extension without disabling built-in tools', () => {
   assert.deepEqual(piToolArgs('/tmp/chatpanel-pi-tools.ts', mcp), ['--extension', '/tmp/chatpanel-pi-tools.ts']);
+});
+
+test('Kiro uses stable MCP setup and trusts the current ChatPanel tools', () => {
+  assert.equal(kiro.spec.requiresStableMcp, true);
+  assert.equal(kiro.spec.stableMcpConfigCheck, 'kiro');
+  assert.equal(
+    stableMcpSetupCommand(kiro.spec),
+    'kiro-cli mcp add --scope global --name chatpanel_browser --url http://127.0.0.1:4319/mcp --force',
+  );
+  assert.deepEqual(trustToolArgs(kiro.spec.trustToolsArg, mcp), [
+    '--trust-tools=browser_click,browser_snapshot',
+  ]);
+});
+
+test('Custom stable-MCP agents are not treated as OpenCode by default', () => {
+  const customJs = readFileSync(new URL('../src/engines/custom.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(customJs, /\|\| !spec\.stableMcpConfigCheck/, 'Custom agents without a known check should not reuse the OpenCode config check.');
 });

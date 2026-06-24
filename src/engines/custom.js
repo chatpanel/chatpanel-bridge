@@ -66,6 +66,7 @@ const IDLE_MS = Number(process.env.CHATPANEL_CUSTOM_TIMEOUT_MS) || 180_000;
 const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 const stripAnsi = (s) => s.replace(ANSI_RE, '');
 const OPENCODE_STABLE_MCP_URL = 'http://127.0.0.1:4319/mcp';
+const CHATPANEL_STABLE_MCP_URL = 'http://127.0.0.1:4319/mcp';
 
 export async function available() {
   // The engine ships in every bridge; individual custom agents are user-defined
@@ -137,6 +138,21 @@ function jsIdentifier(name, index) {
 
 export function piToolArgs(extensionFile, mcp) {
   return ['--extension', extensionFile];
+}
+
+export function trustToolArgs(template, mcp) {
+  const tmpl = String(template || '').trim();
+  const names = mcpToolSpecs(mcp).map((s) => s.name).filter(Boolean);
+  if (!tmpl || !names.length) return [];
+  const value = names.join(',');
+  return tmpl.includes('{tools}')
+    ? tmpl.replaceAll('{tools}', value).split(/\s+/).filter(Boolean)
+    : [...tmpl.split(/\s+/).filter(Boolean), value];
+}
+
+export function stableMcpSetupCommand(spec = {}) {
+  if (spec.stableMcpSetupCommand) return spec.stableMcpSetupCommand;
+  return `opencode mcp add chatpanel --url ${CHATPANEL_STABLE_MCP_URL}`;
 }
 
 export function buildPiExtensionSource(mcp) {
@@ -240,6 +256,44 @@ async function opencodeHasStableMcpConfig() {
   return false;
 }
 
+async function commandStdout(command, args, cwd) {
+  const resolved = resolveCommand(command);
+  if (!resolved) return '';
+  const [bin, argv, opts] = buildSpawnSpec(resolved, args, cwd || null);
+  return new Promise((resolve) => {
+    const child = spawn(bin, argv, opts);
+    let out = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      resolve(out);
+    }, 4000);
+    child.stdout.on('data', (d) => (out += d.toString()));
+    child.on('error', () => {
+      clearTimeout(timer);
+      resolve('');
+    });
+    child.on('close', () => {
+      clearTimeout(timer);
+      resolve(out);
+    });
+    try { child.stdin.end(); } catch { /* ignore */ }
+  });
+}
+
+async function kiroHasStableMcpConfig(command, cwd) {
+  for (const scope of ['workspace', 'global', 'default']) {
+    const out = await commandStdout(command, ['mcp', 'list', scope], cwd);
+    if (out.includes(CHATPANEL_STABLE_MCP_URL) || /chatpanel_browser/i.test(out)) return true;
+  }
+  return false;
+}
+
+async function hasStableMcpConfig(spec, cwd) {
+  if (spec.stableMcpConfigCheck === 'kiro') return kiroHasStableMcpConfig(spec.command || 'kiro-cli', cwd);
+  if (spec.stableMcpConfigCheck === 'opencode') return opencodeHasStableMcpConfig();
+  return false;
+}
+
 export async function chat({ messages, system, options, images }, emit) {
   // Pro gate — verified, not just UI. No valid signed entitlement → no run.
   if (!(await isProEntitled(options.entitlement))) {
@@ -319,14 +373,17 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
       : [...tmpl.split(/\s+/).filter(Boolean), cfgFile];
     args = [...tokens, ...args];
   }
+  if (options.mcp?.url && spec.trustToolsArg) {
+    args.push(...trustToolArgs(spec.trustToolsArg, options.mcp));
+  }
   // NOTE: opencode only loads MCP from its GLOBAL config (~/.config/opencode),
   // never a per-run/project file — so we can't inject it here. opencode reaches
   // the browser tools via the bridge's STABLE /mcp endpoint, registered once with
   // `opencode mcp add chatpanel --url http://127.0.0.1:4319/mcp`.
-  if (options.mcp?.url && spec.requiresStableMcp && !(await opencodeHasStableMcpConfig())) {
+  if (options.mcp?.url && spec.requiresStableMcp && !(await hasStableMcpConfig(spec, cwd))) {
     emit({
       type: 'status',
-      text: `OpenCode needs one-time browser-tool setup: opencode mcp add chatpanel --url ${OPENCODE_STABLE_MCP_URL}`,
+      text: `${label} needs one-time browser-tool setup: ${stableMcpSetupCommand(spec)}`,
     });
   }
 

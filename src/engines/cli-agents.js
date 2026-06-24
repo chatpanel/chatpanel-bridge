@@ -15,7 +15,9 @@ import { findAgentBin } from '../env.js';
 function makeCliAgent(command, spec, notFoundHint) {
   let installed = false;
   let lastProbe = 0;
+  const resolvedSpec = { ...spec, command };
   return {
+    spec: resolvedSpec,
     async available() {
       // Cache a positive result; re-probe (throttled) while not found so it
       // self-heals once the CLI appears on PATH.
@@ -33,7 +35,7 @@ function makeCliAgent(command, spec, notFoundHint) {
       return listSpecModels(command, spec.listModelsArgs, options.workingDir);
     },
     chat(input, emit) {
-      return runSpec({ ...spec, command }, input, emit);
+      return runSpec(resolvedSpec, input, emit);
     },
   };
 }
@@ -67,6 +69,7 @@ export const opencode = makeCliAgent(
     // with `opencode mcp add chatpanel --url http://127.0.0.1:4319/mcp` (opencode
     // only loads MCP from its global config, not a per-run file).
     requiresStableMcp: true,
+    stableMcpConfigCheck: 'opencode',
     listModelsArgs: 'models',
     label: 'OpenCode',
   },
@@ -76,9 +79,13 @@ export const opencode = makeCliAgent(
 export const kiro = makeCliAgent(
   'kiro-cli',
   {
-    args: 'chat --no-interactive',
+    args: 'chat --no-interactive --require-mcp-startup',
     promptVia: 'arg',
     modelArg: '--model {model}',
+    trustToolsArg: '--trust-tools={tools}',
+    requiresStableMcp: true,
+    stableMcpConfigCheck: 'kiro',
+    stableMcpSetupCommand: 'kiro-cli mcp add --scope global --name chatpanel_browser --url http://127.0.0.1:4319/mcp --force',
     listModelsArgs: '--list-models',
     label: 'Kiro',
   },
