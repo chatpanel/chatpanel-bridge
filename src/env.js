@@ -18,7 +18,7 @@ export const AGENT_CLIS = ['codex', 'claude', 'agy', 'pi', 'opencode', 'kiro-cli
 
 // Is `name` executable somewhere on the current PATH?
 function onPath(name) {
-  const dirs = (process.env.PATH || '').split(path.delimiter);
+  const dirs = splitPathList(process.env.PATH || '', process.platform);
   return dirs.some((d) => d && (existsSync(path.join(d, name)) || existsSync(path.join(d, name + '.exe'))));
 }
 
@@ -27,18 +27,10 @@ function onPath(name) {
 // "is it installed/findable", NOT "does `--version` exit 0" (which can fail for
 // reasons unrelated to installation, e.g. the CLI needs login).
 export function findAgentBin(name) {
-  // On Windows, CLIs are usually <name>.cmd / .exe / .bat (npm shims).
-  const exts = process.platform === 'win32' ? ['', '.cmd', '.exe', '.bat', '.ps1'] : [''];
-  const dirs = (process.env.PATH || '').split(path.delimiter);
-  for (const d of dirs) {
-    if (!d) continue;
-    for (const ext of exts) {
-      const p = path.join(d, name + ext);
-      if (existsSync(p)) return p;
+  for (const p of commandCandidateFiles(name)) {
+    if (existsSync(p)) {
+      return p;
     }
-  }
-  for (const p of agentCandidateBins(name, os.homedir())) {
-    if (existsSync(p)) return p;
   }
   return shellWhich(name) || null;
 }
@@ -155,20 +147,20 @@ export function resolveCommand(command) {
 // own Node/Bun — clean arg passing, no cmd.exe quoting), then a real .exe, then a
 // .cmd/.bat shim launched safely via cmd.exe.
 function findCommandWindows(name) {
-  const dirs = (process.env.PATH || '').split(path.delimiter);
-  for (const d of dirs) {
-    if (!d) continue;
-    const exts = ['', '.cmd', '.exe', '.ps1', '.bat'];
-    if (!exts.some((e) => existsSync(path.join(d, name + e)))) continue;
+  const p = pathFor('win32');
+  for (const candidate of commandCandidateFiles(name, os.homedir(), 'win32', process.env)) {
+    if (!existsSync(candidate)) continue;
+    const d = p.dirname(candidate);
+    const ext = p.extname(candidate).toLowerCase();
     // Running cli.js with our own interpreter only works under a real Node/Bun,
     // not inside a compiled single-file binary (which is not a JS interpreter).
     if (!isCompiledBinary()) {
       const js = (name === 'claude' && claudeCliJs(d)) || shimTarget(d, name);
       if (js) return { kind: 'script', script: js };
+      if (/^\.(c?js|mjs)$/.test(ext)) return { kind: 'script', script: candidate };
     }
-    if (existsSync(path.join(d, name + '.exe'))) return { kind: 'native', bin: path.join(d, name + '.exe') };
-    if (existsSync(path.join(d, name + '.cmd'))) return { kind: 'cmd', bin: path.join(d, name + '.cmd') };
-    if (existsSync(path.join(d, name + '.bat'))) return { kind: 'cmd', bin: path.join(d, name + '.bat') };
+    if (ext === '.exe' || ext === '') return { kind: 'native', bin: candidate };
+    if (ext === '.cmd' || ext === '.bat') return { kind: 'cmd', bin: candidate };
   }
   return null;
 }
@@ -293,18 +285,67 @@ function versionManagerBins(home) {
   return bins;
 }
 
-export function agentInstallDirs(home) {
+function pathFor(platform) {
+  return platform === 'win32' ? path.win32 : path;
+}
+
+function pathDelimiterFor(platform) {
+  return platform === 'win32' ? ';' : path.delimiter;
+}
+
+function splitPathList(value, platform) {
+  return (value || '').split(pathDelimiterFor(platform)).filter(Boolean);
+}
+
+function unique(items) {
+  return [...new Set(items.filter(Boolean))];
+}
+
+export function agentInstallDirs(home, platform = process.platform, env = process.env) {
+  const p = pathFor(platform);
+  if (platform === 'win32') {
+    const appData = env.APPDATA || p.join(home, 'AppData', 'Roaming');
+    const localAppData = env.LOCALAPPDATA || p.join(home, 'AppData', 'Local');
+    const programFiles = env.ProgramFiles || 'C:\\Program Files';
+    const programFilesX86 = env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+    const programData = env.ProgramData || 'C:\\ProgramData';
+    return [
+      p.join(home, '.local', 'bin'),
+      p.join(home, '.codex', 'bin'),
+      p.join(home, '.claude', 'bin'),
+      p.join(home, '.claude', 'local'),
+      p.join(home, '.claude', 'local', 'bin'),
+      p.join(appData, 'npm'),
+      p.join(localAppData, 'pnpm'),
+      p.join(localAppData, 'Yarn', 'bin'),
+      p.join(localAppData, 'Volta', 'bin'),
+      p.join(home, '.yarn', 'bin'),
+      p.join(home, '.bun', 'bin'),
+      p.join(home, '.deno', 'bin'),
+      p.join(home, 'scoop', 'shims'),
+      p.join(programData, 'chocolatey', 'bin'),
+      p.join(localAppData, 'Microsoft', 'WindowsApps'),
+      p.join(localAppData, 'Programs', 'Claude Code'),
+      p.join(localAppData, 'Anthropic', 'Claude Code'),
+      p.join(programFiles, 'Claude Code'),
+      p.join(programFiles, 'Anthropic', 'Claude Code'),
+      p.join(programFilesX86, 'Claude Code'),
+      p.join(programFilesX86, 'Anthropic', 'Claude Code'),
+    ];
+  }
   return [
     path.join(home, '.local', 'bin'),
     path.join(home, '.opencode', 'bin'),
     path.join(home, '.codex', 'bin'),
     path.join(home, '.claude', 'bin'),
+    path.join(home, '.claude', 'local'),
     path.join(home, '.claude', 'local', 'bin'),
   ];
 }
 
-function claudeNativeBins(home) {
-  const versionsDir = path.join(home, '.local', 'share', 'claude', 'versions');
+function claudeNativeBins(home, platform = process.platform) {
+  const p = pathFor(platform);
+  const versionsDir = p.join(home, '.local', 'share', 'claude', 'versions');
   let versions = [];
   try {
     versions = readdirSync(versionsDir)
@@ -313,22 +354,43 @@ function claudeNativeBins(home) {
   } catch {
     /* native installer may not be present */
   }
-  return versions.map((v) => path.join(versionsDir, v));
+  return versions.map((v) => p.join(versionsDir, v));
 }
 
-export function agentCandidateBins(name, home = os.homedir()) {
-  const local = path.join(home, '.local', 'bin', name);
+function withWindowsExts(file, platform) {
+  if (platform !== 'win32') return [file];
+  if (/\.(cmd|exe|bat|ps1)$/i.test(file)) return [file];
+  return [file, `${file}.cmd`, `${file}.exe`, `${file}.bat`, `${file}.ps1`];
+}
+
+export function agentCandidateBins(name, home = os.homedir(), platform = process.platform, env = process.env) {
+  const p = pathFor(platform);
+  const local = p.join(home, '.local', 'bin', name);
+  const localAppData = platform === 'win32' ? env.LOCALAPPDATA || p.join(home, 'AppData', 'Local') : null;
+  const programFiles = platform === 'win32' ? env.ProgramFiles || 'C:\\Program Files' : null;
+  const programFilesX86 = platform === 'win32' ? env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)' : null;
   const map = {
     claude: [
       local,
-      path.join(home, '.claude', 'bin', 'claude'),
-      path.join(home, '.claude', 'local', 'claude'),
-      path.join(home, '.claude', 'local', 'bin', 'claude'),
-      ...claudeNativeBins(home),
+      p.join(home, '.claude', 'bin', 'claude'),
+      p.join(home, '.claude', 'local', 'claude'),
+      p.join(home, '.claude', 'local', 'bin', 'claude'),
+      ...(platform === 'win32'
+        ? [
+            p.join(localAppData, 'Microsoft', 'WindowsApps', 'claude.exe'),
+            p.join(localAppData, 'Programs', 'Claude Code', 'claude.exe'),
+            p.join(localAppData, 'Anthropic', 'Claude Code', 'claude.exe'),
+            p.join(programFiles, 'Claude Code', 'claude.exe'),
+            p.join(programFiles, 'Anthropic', 'Claude Code', 'claude.exe'),
+            p.join(programFilesX86, 'Claude Code', 'claude.exe'),
+            p.join(programFilesX86, 'Anthropic', 'Claude Code', 'claude.exe'),
+            ...claudeNativeBins(home, platform),
+          ]
+        : claudeNativeBins(home, platform)),
     ],
     codex: [
       local,
-      path.join(home, '.codex', 'bin', 'codex'),
+      p.join(home, '.codex', 'bin', 'codex'),
     ],
     agy: [
       local,
@@ -339,7 +401,7 @@ export function agentCandidateBins(name, home = os.homedir()) {
       local,
     ],
     opencode: [
-      path.join(home, '.opencode', 'bin', 'opencode'),
+      p.join(home, '.opencode', 'bin', 'opencode'),
       local,
     ],
     'kiro-cli': [
@@ -347,17 +409,32 @@ export function agentCandidateBins(name, home = os.homedir()) {
       '/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli',
     ],
   };
-  return [...new Set(map[name] || [local])];
+  return unique((map[name] || [local]).flatMap((file) => withWindowsExts(file, platform)));
+}
+
+export function commandCandidateFiles(name, home = os.homedir(), platform = process.platform, env = process.env) {
+  const p = pathFor(platform);
+  const fromDirs = unique([
+    ...splitPathList(env.PATH || '', platform),
+    ...agentInstallDirs(home, platform, env),
+  ]).flatMap((dir) => withWindowsExts(p.join(dir, name), platform));
+  return unique([...fromDirs, ...agentCandidateBins(name, home, platform, env)]);
 }
 
 export function enrichPath() {
-  if (enriched || process.platform === 'win32') {
-    enriched = true;
-    return; // Windows scheduled tasks run as the user and inherit a fuller PATH.
-  }
+  if (enriched) return;
   enriched = true;
 
   const home = os.homedir();
+  if (process.platform === 'win32') {
+    const merged = unique([
+      ...splitPathList(process.env.PATH || '', 'win32'),
+      ...agentInstallDirs(home, 'win32', process.env),
+    ]);
+    process.env.PATH = merged.join(pathDelimiterFor('win32'));
+    return;
+  }
+
   const common = [
     '/opt/homebrew/bin',
     '/opt/homebrew/sbin',
