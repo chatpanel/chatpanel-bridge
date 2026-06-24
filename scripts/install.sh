@@ -34,16 +34,21 @@ url="https://dl.chatpanel.net/${asset}"
 dest="${HOME}/.local/bin"
 bin="${dest}/chatpanel-bridge"
 mkdir -p "$dest"
+tmp="$(mktemp "${dest}/.chatpanel-bridge.XXXXXX")"
+trap 'rm -f "$tmp"' EXIT
 
 echo "Downloading ChatPanel Bridge (~60 MB)..."
-curl -fL --progress-bar "$url" -o "$bin"   # show a progress bar (not silent)
-chmod +x "$bin"
-xattr -c "$bin" 2>/dev/null || true   # belt-and-suspenders; curl files aren't quarantined
+curl -fL --progress-bar "$url" -o "$tmp"   # show a progress bar (not silent)
+chmod +x "$tmp"
+xattr -c "$tmp" 2>/dev/null || true   # belt-and-suspenders; curl files aren't quarantined
 
 # Clean upgrade: stop any running bridge (incl. a stray npx one) so the new
 # install replaces it in place — same path, same service, no duplicates.
 pkill -f 'chatpanel-bridge' 2>/dev/null || true
 sleep 1
+rm -f "$bin"
+mv "$tmp" "$bin"
+trap - EXIT
 
 echo "Installed to ${bin}"
 "$bin" --install
