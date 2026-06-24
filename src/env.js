@@ -312,6 +312,7 @@ export function enrichPath() {
     path.join(home, '.cargo', 'bin'),
     path.join(home, '.deno', 'bin'),
     path.join(home, '.bun', 'bin'),
+    path.join(home, '.opencode', 'bin'),
     ...versionManagerBins(home),
   ];
 
