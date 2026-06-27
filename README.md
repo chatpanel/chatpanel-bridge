@@ -7,7 +7,9 @@ so this bridges the gap.
 - **Claude Code** — embedded via `@anthropic-ai/claude-agent-sdk`, using your
   existing Claude Code login (or `ANTHROPIC_API_KEY`).
 - **Codex** — driven via the `codex exec` CLI, using your `codex login`.
-- **Gemini CLI** — driven via the `gemini -p` CLI, using your `gemini` login.
+- **Antigravity CLI** — driven via the `agy -p` CLI, using your Antigravity login.
+  This is Google's successor to Gemini CLI; **Gemini CLI** itself remains available
+  for business/enterprise (paid API keys) and can be added as a custom agent.
 
 Bring whichever agent you already have installed — the extension auto-detects
 the ones the bridge reports as available.
@@ -27,7 +29,7 @@ in-place upgrade.
 ### Windows — via Node (recommended)
 
 Windows SmartScreen flags unsigned downloads, so on Windows run the bridge through
-Node — you already have it if you use Claude Code / Codex / Gemini (all npm CLIs),
+Node — you already have it if you use Claude Code / Codex (both npm CLIs),
 and there's no security prompt:
 
 ```powershell
@@ -64,7 +66,7 @@ The agents you want to use must already be set up:
 
 - **Claude Code**: installed and signed in (`claude`), or set `ANTHROPIC_API_KEY`.
 - **Codex**: `codex` on your `PATH` and `codex login` done.
-- **Gemini CLI**: `gemini` on your `PATH` and signed in.
+- **Antigravity CLI**: `agy` on your `PATH` and signed in (install the Antigravity app, then run `agy` once to sign in). Replaces Gemini CLI; business/enterprise users can still run `gemini` as a custom agent.
 
 The extension polls `/health` and shows each agent as available/unavailable.
 

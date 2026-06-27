@@ -714,7 +714,7 @@ function runMcpStdioProxy(url) {
 }
 
 function startServer() {
-  enrichPath(); // so codex/gemini are found even under a minimal service PATH
+  enrichPath(); // so codex/agy (Antigravity) are found even under a minimal service PATH
   ensureToken(); // per-install bearer token for privileged routes (defense-in-depth)
   server.listen(PORT, HOST, async () => {
     log('info', `listening on http://${HOST}:${PORT}`);

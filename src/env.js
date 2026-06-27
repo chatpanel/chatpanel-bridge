@@ -76,7 +76,7 @@ function shellWhich(name) {
 // ---------------------------------------------------------------------------
 // Claude Code launcher resolution.
 //
-// The Codex/Gemini engines can assume `spawn('codex', …)` runs a directly
+// The Codex/Antigravity engines can assume `spawn('codex', …)` runs a directly
 // executable file on the current OS's PATH. Claude needs more care:
 //   • On Windows, npm installs `claude.cmd` / `claude.ps1` / an extensionless
 //     bash shim — NONE of which Node's spawn() can execute directly (that's the
