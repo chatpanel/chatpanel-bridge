@@ -36,7 +36,7 @@ import { callLocalMcp } from './mcp-local.js';
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.11';
+const VERSION = '0.10.12';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -224,6 +224,7 @@ function tokenOk(req) {
 const PRIVILEGED_POST = new Set([
   '/chat',
   '/mcp-local',
+  '/mcp-remote',
   '/complete',
   '/list-models',
   '/agent-check',
@@ -231,6 +232,32 @@ const PRIVILEGED_POST = new Set([
   '/tool-result',
 ]);
 const PRIVILEGED_GET = new Set(['/debug']);
+
+// SSRF guard for /mcp-remote: the bridge must not become an open relay into the
+// local network. Block non-http(s) schemes and private/loopback/link-local/
+// metadata hosts — on the initial URL AND after any redirect.
+function isBlockedHttpHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true;
+  if (h === '::1' || h === '::' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb')) return true;
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const a = Number(m[1]), b = Number(m[2]);
+    if (a === 0 || a === 127 || a === 10) return true;       // this-host / loopback / RFC1918
+    if (a === 169 && b === 254) return true;                 // link-local + cloud metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;        // RFC1918
+    if (a === 192 && b === 168) return true;                 // RFC1918
+    if (a === 100 && b >= 64 && b <= 127) return true;       // CGNAT
+  }
+  return false;
+}
+function assertPublicHttpUrl(u) {
+  let parsed;
+  try { parsed = new URL(u); } catch { throw new Error(`invalid URL: ${u}`); }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error(`only http(s) URLs allowed (got "${parsed.protocol}")`);
+  if (isBlockedHttpHost(parsed.hostname)) throw new Error(`refusing to proxy a private/loopback/metadata address (${parsed.hostname})`);
+  return parsed;
+}
 
 // Returns an error code if the request must be blocked, else null.
 function guard(req, pathname) {
@@ -441,6 +468,59 @@ async function handleMcpLocal(req, res) {
   }
 }
 
+// POST /mcp-remote — proxy ONE JSON-RPC message to a remote Streamable-HTTP MCP
+// server FROM the bridge (server-side, no browser Origin header), so the extension
+// can reach servers that reject browser origins (their own DNS-rebinding/CORS
+// protection). Body: { url, headers?, message }. Returns the upstream
+// { status, sessionId, contentType, body } for the extension to parse. Privileged
+// route + SSRF guard, so it can't be driven by a page or relay into the LAN.
+async function handleMcpRemote(req, res) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return json(res, 400, { error: 'Bad JSON: ' + e.message });
+  }
+  const { url, headers: hdrs, message } = body || {};
+  if (!url || !message) return json(res, 400, { error: 'need url and message' });
+  let target;
+  try {
+    target = assertPublicHttpUrl(url);
+  } catch (e) {
+    return json(res, 400, { error: String(e?.message || e) });
+  }
+  // Forward only safe, MCP-relevant client headers (auth, session, protocol, x-*);
+  // never the Host/hop-by-hop headers. Content-Type/Accept are set by us.
+  const fwd = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' };
+  if (hdrs && typeof hdrs === 'object') {
+    for (const [k, v] of Object.entries(hdrs)) {
+      const lk = k.toLowerCase();
+      if (['authorization', 'mcp-session-id', 'mcp-protocol-version', 'x-api-key'].includes(lk) || lk.startsWith('x-')) {
+        fwd[k] = String(v);
+      }
+    }
+  }
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 30_000);
+  try {
+    const up = await fetch(target.href, { method: 'POST', headers: fwd, body: JSON.stringify(message), redirect: 'follow', signal: ac.signal });
+    // A redirect may have landed on an internal host — re-check the final URL.
+    try { if (up.url) assertPublicHttpUrl(up.url); } catch (e) { return json(res, 400, { error: String(e?.message || e) }); }
+    const text = await up.text().catch(() => '');
+    return json(res, 200, {
+      status: up.status,
+      sessionId: up.headers.get('Mcp-Session-Id') || null,
+      contentType: up.headers.get('Content-Type') || '',
+      body: text,
+    });
+  } catch (e) {
+    const why = e?.name === 'AbortError' ? 'timed out' : String(e?.message || e);
+    return json(res, 502, { error: `couldn't reach MCP server ${target.host}: ${why}` });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 // POST /tool-result — the extension returns a relayed tool's result.
 async function handleToolResult(req, res) {
   let body;
@@ -582,6 +662,7 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === 'POST' && url.pathname === '/tool-result') return handleToolResult(req, res);
     if (req.method === 'POST' && url.pathname === '/mcp-local') return handleMcpLocal(req, res);
+    if (req.method === 'POST' && url.pathname === '/mcp-remote') return handleMcpRemote(req, res);
     if (req.method === 'POST' && url.pathname === '/complete') return handleComplete(req, res);
     if (req.method === 'POST' && url.pathname === '/list-models') return handleListModels(req, res);
     if (req.method === 'POST' && url.pathname === '/agent-check') return handleAgentCheck(req, res);
