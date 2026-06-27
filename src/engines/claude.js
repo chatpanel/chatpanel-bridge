@@ -244,7 +244,18 @@ export async function chat({ messages, system, options, images }, emit) {
     }: ${imageFiles.join(', ')}`;
   }
 
-  if (options.extraArgs) args.push(...String(options.extraArgs).split(/\s+/).filter(Boolean));
+  if (options.extraArgs) {
+    const extra = String(options.extraArgs).split(/\s+/).filter(Boolean);
+    // Never let caller-supplied extras re-open the read-only boundary the mode
+    // flags above establish. If ANY security-sensitive flag is present, drop the
+    // whole extraArgs (these tokens take values, so partial filtering is unsafe).
+    const FORBIDDEN = /^--?(permission-mode|allowed-?tools|disallowed-?tools|dangerously|add-dir|mcp-config|setting-sources|permission-prompt-tool)/i;
+    if (extra.some((t) => FORBIDDEN.test(t))) {
+      emit({ type: 'status', text: '(ignored unsafe extraArgs)' });
+    } else {
+      args.push(...extra);
+    }
+  }
   const run = runClaude({ prompt, args, cwd, emit });
   if (run === null) {
     cleanup(); // SDK fallback doesn't take images yet

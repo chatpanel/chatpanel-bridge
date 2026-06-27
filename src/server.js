@@ -12,11 +12,17 @@
 //                     {type:'done',  text?}    (text only if not streamed)
 //                     {type:'error', error}
 //
-// Binds to 127.0.0.1 only and accepts requests from the extension origin.
+// Binds to 127.0.0.1 only. A request guard (see `guard()`) enforces a loopback
+// Host (anti DNS-rebinding) and an allowlisted Origin; the command-spawning
+// endpoints (/chat, /mcp-local, /update, …) additionally require the extension
+// origin or the per-install bridge token, so a malicious web page can't drive
+// local execution. The CLI-facing /mcp endpoints stay open to no-Origin clients.
 
 import { createServer } from 'node:http';
 import os from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
 import * as claude from './engines/claude.js';
 import * as codex from './engines/codex.js';
 import * as antigravity from './engines/antigravity.js';
@@ -30,7 +36,7 @@ import { callLocalMcp } from './mcp-local.js';
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.10';
+const VERSION = '0.10.11';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -115,18 +121,129 @@ function toMcpContent(result) {
 
 // --------------------------------------------------------------------------
 // CORS — allow the extension (chrome-extension://…) and localhost dev origins.
+// NOTE: CORS only controls whether a *page* may READ the response; it does NOT
+// stop a cross-origin request from running. The hard allow/deny gating that
+// actually protects the command-spawning endpoints lives in `guard()` below.
 // --------------------------------------------------------------------------
-function cors(req, res) {
-  const origin = req.headers.origin || '';
-  const allow =
+function originAllowed(origin) {
+  return (
     !origin ||
     origin.startsWith('chrome-extension://') ||
     origin.startsWith('moz-extension://') ||
     origin.startsWith('http://localhost') ||
-    origin.startsWith('http://127.0.0.1');
+    origin.startsWith('http://127.0.0.1') ||
+    origin.startsWith('http://[::1]')
+  );
+}
+
+// An origin that identifies the ChatPanel extension (or a local dev build).
+// Distinct from originAllowed(): this REQUIRES the header to be present, so a
+// no-Origin local process cannot pose as the extension on privileged routes.
+function isExtensionOrigin(origin) {
+  return (
+    origin.startsWith('chrome-extension://') ||
+    origin.startsWith('moz-extension://') ||
+    origin.startsWith('http://localhost') ||
+    origin.startsWith('http://127.0.0.1') ||
+    origin.startsWith('http://[::1]')
+  );
+}
+
+function cors(req, res) {
+  const origin = req.headers.origin || '';
+  const allow = originAllowed(origin);
   res.setHeader('Access-Control-Allow-Origin', allow ? origin || '*' : 'null');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-ChatPanel-Token');
+  res.setHeader('Vary', 'Origin');
+}
+
+// --------------------------------------------------------------------------
+// Security gates — defend the localhost server against a malicious web page.
+//
+// Two browser attack classes are in scope even though we bind to 127.0.0.1:
+//   1. DNS rebinding — a page on http://evil.example rebinds that name to
+//      127.0.0.1 and fetches http://evil.example:PORT/…; the request arrives
+//      with Host: evil.example, which a naïve server happily serves.
+//   2. Cross-origin CSRF — a page POSTs a CORS "simple" request (text/plain)
+//      to http://127.0.0.1:PORT/…; no preflight fires and the side effect runs.
+//
+// hostAllowed() closes (1) by rejecting any non-loopback Host. The Origin
+// checks close (2). Privileged endpoints additionally require the extension
+// origin or the per-install token, so a no-Origin local process can't drive
+// command execution either.
+// --------------------------------------------------------------------------
+const LOOPBACK_HOSTNAMES = new Set(['127.0.0.1', 'localhost', '::1']);
+
+function hostAllowed(req) {
+  // If the operator deliberately bound to a non-loopback/all interface
+  // (CHATPANEL_BRIDGE_HOST=0.0.0.0 / a LAN IP), don't second-guess their Host.
+  if (!LOOPBACK_HOSTNAMES.has(HOST)) return true;
+  const raw = String(req.headers.host || '');
+  if (!raw) return false; // HTTP/1.1 requires Host; absent → reject
+  const hostname = raw
+    .replace(/:\d+$/, '') // strip :port
+    .replace(/^\[|\]$/g, '') // strip IPv6 brackets
+    .toLowerCase();
+  return LOOPBACK_HOSTNAMES.has(hostname);
+}
+
+// Per-install bearer token — defense-in-depth so a non-browser local client can
+// authenticate to privileged routes without relying on an Origin header. Written
+// 0600 to ~/.chatpanel/bridge-token; the extension is allowed by origin and need
+// not send it, so adding this never breaks the existing wire contract.
+const TOKEN_PATH = join(os.homedir(), '.chatpanel', 'bridge-token');
+let AUTH_TOKEN = '';
+function ensureToken() {
+  try {
+    if (existsSync(TOKEN_PATH)) AUTH_TOKEN = readFileSync(TOKEN_PATH, 'utf8').trim();
+    if (!AUTH_TOKEN) {
+      AUTH_TOKEN = randomBytes(32).toString('hex');
+      mkdirSync(join(os.homedir(), '.chatpanel'), { recursive: true });
+      writeFileSync(TOKEN_PATH, AUTH_TOKEN, { mode: 0o600 });
+    }
+  } catch (e) {
+    // Token is optional hardening — never fail startup over it.
+    log('error', `could not initialise bridge token: ${e?.message || e}`);
+  }
+}
+function tokenOk(req) {
+  if (!AUTH_TOKEN) return false;
+  const h = String(req.headers['authorization'] || '');
+  const provided = (h.startsWith('Bearer ') ? h.slice(7) : String(req.headers['x-chatpanel-token'] || '')).trim();
+  if (!provided) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(AUTH_TOKEN);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+// POST sinks that spawn local agents/commands or self-update, plus GET /debug
+// (leaks PATH/home). Only the extension (allowlisted origin) or a token-bearing
+// client may reach these. The CLI-facing /mcp and /mcp/<id> routes are NOT here:
+// local coding-agent CLIs connect to them with no Origin header by design.
+const PRIVILEGED_POST = new Set([
+  '/chat',
+  '/mcp-local',
+  '/complete',
+  '/list-models',
+  '/agent-check',
+  '/update',
+  '/tool-result',
+]);
+const PRIVILEGED_GET = new Set(['/debug']);
+
+// Returns an error code if the request must be blocked, else null.
+function guard(req, pathname) {
+  if (!hostAllowed(req)) return 'forbidden host';
+  const origin = req.headers.origin || '';
+  if (origin && !originAllowed(origin)) return 'forbidden origin';
+  const privileged =
+    (req.method === 'POST' && PRIVILEGED_POST.has(pathname)) ||
+    (req.method === 'GET' && PRIVILEGED_GET.has(pathname));
+  if (privileged && !(isExtensionOrigin(origin) || tokenOk(req))) {
+    return 'forbidden: this endpoint requires the ChatPanel extension or a valid bridge token';
+  }
+  return null;
 }
 
 function json(res, code, obj) {
@@ -431,7 +548,15 @@ const server = createServer(async (req, res) => {
     res.writeHead(204);
     return res.end();
   }
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  let url;
+  try {
+    url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
+  } catch {
+    return json(res, 400, { error: 'bad request' });
+  }
+  // Block DNS-rebinding / cross-origin CSRF before any route runs.
+  const blocked = guard(req, url.pathname);
+  if (blocked) return json(res, 403, { error: blocked });
   try {
     if (req.method === 'GET' && url.pathname === '/health') return handleHealth(res);
     if (req.method === 'GET' && url.pathname === '/debug') {
@@ -527,6 +652,7 @@ function runMcpStdioProxy(url) {
 
 function startServer() {
   enrichPath(); // so codex/gemini are found even under a minimal service PATH
+  ensureToken(); // per-install bearer token for privileged routes (defense-in-depth)
   server.listen(PORT, HOST, async () => {
     log('info', `listening on http://${HOST}:${PORT}`);
     for (const [, { engine, label, hidden }] of Object.entries(ENGINES)) {
