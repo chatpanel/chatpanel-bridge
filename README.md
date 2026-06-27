@@ -124,3 +124,19 @@ macOS (launchd) example — save to `~/Library/LaunchAgents/app.chatpanel.bridge
 ```
 
 Then `launchctl load ~/Library/LaunchAgents/app.chatpanel.bridge.plist`.
+
+## License
+
+**Source-available**, under the [**PolyForm Shield License 1.0.0**](LICENSE).
+Read, audit, run, and modify it for your own use — you just may not use it to
+provide a product or service that **competes** with ChatPanel. The
+[extension](https://github.com/chatpanel/chatpanel-extension) is under the same
+license. This is *not* an OSI "open source" license; the source is published for
+transparency and trust (this bridge runs on your machine with file access, so it
+should be auditable), not for re-packaging or resale.
+
+## Trademarks & brand
+
+The name **“ChatPanel”**, the logo, and brand assets are **trademarks of ChatPanel,
+not licensed** under the terms above — the Shield license covers the code only.
+Don't redistribute a fork (e.g. to npm) under the ChatPanel name or marks.
