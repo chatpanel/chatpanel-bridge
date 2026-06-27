@@ -32,11 +32,12 @@ import { installService, uninstallService, serviceStatus, restartService } from 
 import { AGENT_CLIS, enrichPath, findAgentBin, resolveCommand } from './env.js';
 import { checkForUpdate, selfUpdate } from './update.js';
 import { callLocalMcp } from './mcp-local.js';
+import { assertPublicHttpUrl } from './ssrf.js';
 
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.13';
+const VERSION = '0.10.14';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -233,31 +234,12 @@ const PRIVILEGED_POST = new Set([
 ]);
 const PRIVILEGED_GET = new Set(['/debug']);
 
-// SSRF guard for /mcp-remote: the bridge must not become an open relay into the
-// local network. Block non-http(s) schemes and private/loopback/link-local/
-// metadata hosts — on the initial URL AND after any redirect.
-function isBlockedHttpHost(hostname) {
-  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true;
-  if (h === '::1' || h === '::' || h.startsWith('fc') || h.startsWith('fd') || h.startsWith('fe8') || h.startsWith('fe9') || h.startsWith('fea') || h.startsWith('feb')) return true;
-  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (m) {
-    const a = Number(m[1]), b = Number(m[2]);
-    if (a === 0 || a === 127 || a === 10) return true;       // this-host / loopback / RFC1918
-    if (a === 169 && b === 254) return true;                 // link-local + cloud metadata
-    if (a === 172 && b >= 16 && b <= 31) return true;        // RFC1918
-    if (a === 192 && b === 168) return true;                 // RFC1918
-    if (a === 100 && b >= 64 && b <= 127) return true;       // CGNAT
-  }
-  return false;
-}
-function assertPublicHttpUrl(u) {
-  let parsed;
-  try { parsed = new URL(u); } catch { throw new Error(`invalid URL: ${u}`); }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error(`only http(s) URLs allowed (got "${parsed.protocol}")`);
-  if (isBlockedHttpHost(parsed.hostname)) throw new Error(`refusing to proxy a private/loopback/metadata address (${parsed.hostname})`);
-  return parsed;
-}
+// SSRF guard for /mcp-remote lives in ./ssrf.js (assertPublicHttpUrl). Loopback
+// is allowed (the user's own localhost MCP server — the common "via bridge"
+// case; the extension can reach it directly anyway), cloud metadata is always
+// blocked, and other private/LAN ranges are blocked unless the operator sets
+// CHATPANEL_BRIDGE_ALLOW_PRIVATE_HOSTS=1. Checked on the initial URL AND after
+// any redirect.
 
 // Returns an error code if the request must be blocked, else null.
 function guard(req, pathname) {
