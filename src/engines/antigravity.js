@@ -11,7 +11,7 @@
 // path so the model opens it.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
+import { mkdirSync, writeFileSync, unlinkSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin } from '../env.js';
@@ -78,6 +78,57 @@ function writeImages(images, dir) {
   return files;
 }
 
+// Antigravity has no per-run MCP flag (`agy --help` shows none). The CLI only
+// discovers MCP servers from config files: <cwd>/.agents/mcp_config.json
+// (workspace) or ~/.gemini/config/mcp_config.json (global). To give a headless
+// `agy -p` run our page/MCP tools, write the workspace file pointing at the
+// bridge's per-session HTTP MCP server. Remote servers MUST use `serverUrl`
+// (Antigravity rejects the legacy `url`/`httpUrl` fields). This is the agy
+// equivalent of what claude.js/codex.js do via --mcp-config / -c mcp_servers.
+//
+// Non-destructive: an existing .agents/mcp_config.json is parsed, our one server
+// merged in, and the original restored on cleanup. If the file exists but isn't
+// JSON we recognize, we leave it untouched (and tools simply won't attach) rather
+// than risk corrupting the user's config. Returns a cleanup fn (always callable).
+function setupMcpConfig(mcp, cwd) {
+  if (!mcp?.url) return () => {};
+  const dir = path.join(cwd, '.agents');
+  const file = path.join(dir, 'mcp_config.json');
+  const serverName = mcp.serverName || 'chatpanel_browser';
+  const hadDir = existsSync(dir);
+  let prev = null; // original file contents (null = file did not exist)
+
+  let config = { mcpServers: {} };
+  if (existsSync(file)) {
+    try {
+      prev = readFileSync(file, 'utf8');
+      const parsed = JSON.parse(prev);
+      if (!parsed || typeof parsed !== 'object') return () => {};
+      config = parsed;
+      if (!config.mcpServers || typeof config.mcpServers !== 'object') config.mcpServers = {};
+    } catch {
+      return () => {}; // unreadable / not JSON — don't clobber it
+    }
+  }
+  config.mcpServers[serverName] = { serverUrl: mcp.url };
+
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, JSON.stringify(config, null, 2));
+  } catch {
+    return () => {};
+  }
+  return () => {
+    try {
+      if (prev !== null) writeFileSync(file, prev); // restore original contents
+      else if (hadDir) rmSync(file, { force: true }); // remove just the file we added
+      else rmSync(dir, { recursive: true, force: true }); // remove the dir we created
+    } catch {
+      /* best effort */
+    }
+  };
+}
+
 export async function chat({ messages, system, options, images }, emit) {
   try {
     mkdirSync(SCRATCH, { recursive: true });
@@ -90,18 +141,29 @@ export async function chat({ messages, system, options, images }, emit) {
   // reads @-referenced files (incl. images) inline as multimodal input, so no
   // read-tool approval is needed in headless `-p` mode. (Confirmed working.)
   const imageFiles = writeImages(images, cwd);
-  const cleanup = () => imageFiles.forEach((f) => { try { unlinkSync(f); } catch { /* gone */ } });
+  // Wire our page/MCP tools into agy via a workspace mcp_config.json (it has no
+  // per-run MCP flag). Tools then route: agy → bridge /mcp/<session> → extension.
+  const cleanupMcp = setupMcpConfig(options.mcp, cwd);
+  const cleanup = () => {
+    imageFiles.forEach((f) => { try { unlinkSync(f); } catch { /* gone */ } });
+    cleanupMcp();
+  };
   let prompt = buildCliPrompt(messages, system);
   if (imageFiles.length) {
     prompt += `\n\nThe user attached image(s): ${imageFiles.map((f) => '@' + path.basename(f)).join(' ')}`;
   }
 
   // `-p` runs one prompt non-interactively. --model picks the model.
-  // --dangerously-skip-permissions auto-approves tool use (headless has no human
-  // approver) only when the user opted into bypassPermissions.
   const args = ['-p', prompt];
   if (options.model) args.push('--model', options.model);
-  if (options.permissionMode === 'bypassPermissions') args.push('--dangerously-skip-permissions');
+  // Headless `agy -p` cannot prompt for tool approval — without this flag any MCP
+  // tool call just times out (it never reaches the server). So skip agy's own
+  // approval whenever the user opted into bypass OR we've attached page/MCP tools.
+  // The real gate stays on the ChatPanel side: each relayed call goes back to the
+  // extension, which applies its per-action confirmation for risky page actions.
+  if (options.permissionMode === 'bypassPermissions' || options.mcp?.url) {
+    args.push('--dangerously-skip-permissions');
+  }
   if (options.extraArgs) args.push(...String(options.extraArgs).split(/\s+/).filter(Boolean));
 
   await new Promise((resolve, reject) => {
