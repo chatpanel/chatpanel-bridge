@@ -1,6 +1,6 @@
 {
   "name": "@chatpanel/bridge",
-  "version": "0.10.16",
+  "version": "0.10.17",
   "type": "module",
   "description": "Local bridge that exposes the AI coding agents installed on your machine — Claude Code (CLI), Codex (CLI), and Antigravity CLI (formerly Gemini CLI, which remains available for business/enterprise) — to the ChatPanel Chrome extension over a localhost SSE endpoint. Bring your own agent.",
   "keywords": [

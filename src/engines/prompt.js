@@ -1,3 +1,5 @@
+import { stripHidden } from '../sanitize.js';
+
 function roleLabel(role) {
   return role === 'assistant' ? 'Assistant' : 'User';
 }
@@ -24,5 +26,10 @@ export function buildCliPrompt(messages = [], system = '') {
     );
   }
 
-  return parts.join('\n\n---\n\n');
+  // De-steganography on the final prompt before it reaches the local agent. The
+  // extension already scrubs when its redaction is on, but the bridge is also a
+  // public localhost endpoint other clients can call — so strip invisible/format
+  // Unicode here too (hidden instructions via Tag chars, zero-width-split values,
+  // injected fingerprint markers). See src/sanitize.js.
+  return stripHidden(parts.join('\n\n---\n\n'));
 }
