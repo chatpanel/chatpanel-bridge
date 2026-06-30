@@ -37,7 +37,7 @@ import { assertPublicHttpUrl } from './ssrf.js';
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.17';
+const VERSION = '0.10.18';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -716,6 +716,17 @@ function runMcpStdioProxy(url) {
 function startServer() {
   enrichPath(); // so codex/agy (Antigravity) are found even under a minimal service PATH
   ensureToken(); // per-install bearer token for privileged routes (defense-in-depth)
+  // Fail LOUD on a port clash. The bridge binds a FIXED 4319 so the extension always
+  // finds it; if it's taken, say how to recover instead of dying on a raw stack trace.
+  server.on('error', (e) => {
+    if (e && e.code === 'EADDRINUSE') {
+      log('error', `Port ${PORT} is already in use — another app (or a second bridge) has it.`);
+      log('error', `Fix: free the port, or run with CHATPANEL_BRIDGE_PORT=<port> and set the same Bridge URL in the extension's settings.`);
+      process.exit(1);
+    }
+    log('error', `bridge server error: ${e?.message || e}`);
+    process.exit(1);
+  });
   server.listen(PORT, HOST, async () => {
     log('info', `listening on http://${HOST}:${PORT}`);
     for (const [, { engine, label, hidden }] of Object.entries(ENGINES)) {
