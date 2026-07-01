@@ -301,6 +301,9 @@ function toolSummary(block) {
   if (i.file_path) return path.basename(i.file_path);
   if (i.pattern) return i.pattern;
   if (i.url) return i.url;
+  if (i.description) return String(i.description).slice(0, 80); // Task (subagent) — what it's for
+  if (i.query) return String(i.query).slice(0, 80);             // WebSearch / search tools
+  if (i.prompt) return String(i.prompt).slice(0, 80);           // subagent prompt fallback
   return '';
 }
 
