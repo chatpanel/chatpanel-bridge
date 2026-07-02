@@ -185,6 +185,21 @@ export function handleMessage(msg, emit, alreadyStreamed) {
   } else if (msg.type === 'result') {
     if (msg.subtype === 'success') out.result = msg.result || '';
     else emit({ type: 'status', text: `(${msg.subtype})` });
+    // Forward token usage so the client can account for CLI-agent turns. The
+    // result message carries cumulative usage (+ a real subscription cost).
+    // Additive event — older clients ignore an unknown SSE type.
+    const u = msg.usage || msg.message?.usage;
+    if (u) {
+      emit({
+        type: 'usage',
+        provider: 'bridge',
+        inputTokens: u.input_tokens || 0,
+        outputTokens: u.output_tokens || 0,
+        cacheReadTokens: u.cache_read_input_tokens || 0,
+        cacheWriteTokens: u.cache_creation_input_tokens || 0,
+        costUsd: msg.total_cost_usd != null ? msg.total_cost_usd : null,
+      });
+    }
   }
   return out;
 }
