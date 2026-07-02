@@ -100,3 +100,56 @@ export function assertPublicHttpUrl(u) {
   }
   return parsed;
 }
+
+// STRICTER guard for fetching arbitrary WEB pages (the /fetch-title route). Unlike the MCP proxy,
+// a page fetch has NO legitimate reason to reach the user's own loopback services or any LAN /
+// private host — those would be pure SSRF (port-scan the LAN, hit a localhost admin panel, read
+// cloud metadata). So loopback + metadata + every private/internal range are blocked
+// UNCONDITIONALLY here; the CHATPANEL_BRIDGE_ALLOW_PRIVATE_HOSTS opt-in (meant for reaching a LAN
+// MCP server, a different trust context) is deliberately NOT honored. Only genuinely public
+// http(s) hosts pass. Re-run this on every redirect hop, not just the initial URL.
+export function isDisallowedWebHost(hostname) {
+  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h) return true;
+  if (isLoopbackHost(h)) return true; // localhost/127.x — a page fetch must never touch it
+  if (isMetadataHost(h)) return true; // 169.254.169.254 — credential theft
+  if (h.endsWith('.local')) return true; // mDNS / LAN
+  if (
+    h === '::' ||
+    h.startsWith('fc') ||
+    h.startsWith('fd') || // IPv6 ULA
+    h.startsWith('fe8') ||
+    h.startsWith('fe9') ||
+    h.startsWith('fea') ||
+    h.startsWith('feb') // IPv6 link-local
+  ) {
+    return true;
+  }
+  const o = ipv4(h);
+  if (o) {
+    const [a, b] = o;
+    if (a === 0 || a === 10) return true; // this-host / RFC1918
+    if (a === 127) return true; // loopback (also caught above; explicit for clarity)
+    if (a === 169 && b === 254) return true; // link-local (incl. metadata)
+    if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
+    if (a === 192 && b === 168) return true; // RFC1918
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  }
+  return false;
+}
+
+export function assertPublicWebUrl(u) {
+  let parsed;
+  try {
+    parsed = new URL(u);
+  } catch {
+    throw new Error(`invalid URL: ${u}`);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error(`only http(s) URLs allowed (got "${parsed.protocol}")`);
+  }
+  if (isDisallowedWebHost(parsed.hostname)) {
+    throw new Error(`refusing to fetch a private/loopback/metadata address (${parsed.hostname})`);
+  }
+  return parsed;
+}

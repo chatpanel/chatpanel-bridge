@@ -32,12 +32,12 @@ import { installService, uninstallService, serviceStatus, restartService } from 
 import { AGENT_CLIS, enrichPath, findAgentBin, resolveCommand } from './env.js';
 import { checkForUpdate, selfUpdate } from './update.js';
 import { callLocalMcp } from './mcp-local.js';
-import { assertPublicHttpUrl } from './ssrf.js';
+import { assertPublicHttpUrl, assertPublicWebUrl } from './ssrf.js';
 
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.20';
+const VERSION = '0.10.21';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -226,6 +226,7 @@ const PRIVILEGED_POST = new Set([
   '/chat',
   '/mcp-local',
   '/mcp-remote',
+  '/fetch-title',
   '/complete',
   '/list-models',
   '/agent-check',
@@ -503,6 +504,101 @@ async function handleMcpRemote(req, res) {
   }
 }
 
+// POST /fetch-title — fetch a PUBLIC web page and return ONLY its <title>, so a client can turn
+// a bare URL into a readable [Title](url) link without the browser's Origin/CORS limits and
+// without any third-party title service. This is the canonical "secure web fetch" the bridge
+// offers on behalf of clients:
+//   • Privileged route (extension origin or bridge token only) — a random page can't drive it.
+//   • STRICTER SSRF guard than /mcp-remote (assertPublicWebUrl): loopback / LAN / metadata are
+//     blocked unconditionally — a page fetch has no business touching internal hosts.
+//   • Redirects are followed MANUALLY, re-validating EVERY hop, so it can never be bounced onto
+//     an internal address (stronger than an after-the-fact final-URL check).
+//   • Response is read with a hard byte cap and stops at </title> — we only need the <head>.
+//   • No cookies / auth / referer are ever sent; only the title string is returned.
+const FT_MAX_BYTES = 256 * 1024;
+const FT_MAX_REDIRECTS = 5;
+const FT_TIMEOUT_MS = 8000;
+
+async function fetchTitleSafely(rawUrl) {
+  let current = assertPublicWebUrl(rawUrl); // throws on non-http(s) / private / loopback / metadata
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), FT_TIMEOUT_MS);
+  try {
+    for (let hop = 0; hop <= FT_MAX_REDIRECTS; hop++) {
+      const res = await fetch(current.href, {
+        method: 'GET',
+        redirect: 'manual', // follow hops ourselves so each target is re-validated before we call it
+        signal: ac.signal,
+        headers: { Accept: 'text/html,application/xhtml+xml', 'Accept-Language': 'en', 'User-Agent': `chatpanel-bridge/${VERSION} (+link-title)` },
+      });
+      if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+        current = assertPublicWebUrl(new URL(res.headers.get('location'), current).href); // re-guard the redirect
+        if (res.body) { try { await res.body.cancel(); } catch { /* ignore */ } }
+        continue;
+      }
+      if (!res.ok) { if (res.body) { try { await res.body.cancel(); } catch { /* ignore */ } } return { title: null }; }
+      const ct = res.headers.get('content-type') || '';
+      if (!/text\/html|application\/xhtml/i.test(ct)) { if (res.body) { try { await res.body.cancel(); } catch { /* ignore */ } } return { title: null }; }
+      return { title: extractTitle(await readCapped(res)), url: current.href };
+    }
+    throw new Error('too many redirects');
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Read the response body up to FT_MAX_BYTES, stopping as soon as we've seen the closing </title>.
+async function readCapped(res) {
+  if (!res.body?.getReader) return (await res.text().catch(() => '')).slice(0, FT_MAX_BYTES);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  let out = '';
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      out += decoder.decode(value, { stream: true });
+      if (/<\/title\s*>/i.test(out) || total >= FT_MAX_BYTES) break;
+    }
+  } finally {
+    try { await reader.cancel(); } catch { /* ignore */ }
+  }
+  return out;
+}
+
+function decodeEntities(s) {
+  return String(s)
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&(?:apos|#0*39|#x0*27);/gi, "'")
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#(\d+);/g, (_, d) => { try { return String.fromCodePoint(+d); } catch { return ''; } })
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => { try { return String.fromCodePoint(parseInt(h, 16)); } catch { return ''; } });
+}
+
+function extractTitle(html) {
+  const m = /<title[^>]*>([\s\S]*?)<\/title\s*>/i.exec(html);
+  return m ? decodeEntities(m[1]).replace(/\s+/g, ' ').trim().slice(0, 200) : '';
+}
+
+async function handleFetchTitle(req, res) {
+  let body;
+  try { body = await readBody(req); } catch (e) { return json(res, 400, { error: 'Bad JSON: ' + e.message }); }
+  const url = body && body.url;
+  if (!url || typeof url !== 'string') return json(res, 400, { error: 'need url' });
+  try {
+    const out = await fetchTitleSafely(url);
+    return json(res, 200, { title: out.title || null, url: out.url || url });
+  } catch (e) {
+    const why = e?.name === 'AbortError' ? 'timed out' : String(e?.message || e);
+    return json(res, 400, { error: `couldn't fetch title: ${why}` });
+  }
+}
+
 // POST /tool-result — the extension returns a relayed tool's result.
 async function handleToolResult(req, res) {
   let body;
@@ -645,6 +741,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname === '/tool-result') return handleToolResult(req, res);
     if (req.method === 'POST' && url.pathname === '/mcp-local') return handleMcpLocal(req, res);
     if (req.method === 'POST' && url.pathname === '/mcp-remote') return handleMcpRemote(req, res);
+    if (req.method === 'POST' && url.pathname === '/fetch-title') return handleFetchTitle(req, res);
     if (req.method === 'POST' && url.pathname === '/complete') return handleComplete(req, res);
     if (req.method === 'POST' && url.pathname === '/list-models') return handleListModels(req, res);
     if (req.method === 'POST' && url.pathname === '/agent-check') return handleAgentCheck(req, res);
