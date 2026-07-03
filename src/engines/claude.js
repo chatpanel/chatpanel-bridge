@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { resolveClaude, buildSpawnSpec, isCompiledBinary, selfMcpStdio } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
+import { killOnAbort } from '../proc.js';
 
 // Write base64 data-URL images to temp files. Claude Code reads them with its
 // Read tool (which feeds images to the model as vision), so we just reference the
@@ -95,7 +96,7 @@ export function claudeMcpConfig(mcp) {
 // Spawn claude (however it resolves) and stream its stream-json output via
 // `emit`. Resolves with { streamedAny, resultText } once it closes 0. Returns
 // null (no spawn) when claude can't be resolved, so the caller can fall back.
-function runClaude({ prompt, args, cwd, emit }) {
+function runClaude({ prompt, args, cwd, emit, signal }) {
   const spec = resolveClaude();
   if (!spec) return null;
   const [bin, argv, opts] = buildSpawnSpec(spec, args, cwd);
@@ -107,6 +108,8 @@ function runClaude({ prompt, args, cwd, emit }) {
     } catch (e) {
       return reject(new Error(`Failed to start claude: ${e.message}`));
     }
+
+    const detach = killOnAbort(child, signal); // Stop → terminate the claude child
 
     let stdout = '';
     let stderr = '';
@@ -145,10 +148,13 @@ function runClaude({ prompt, args, cwd, emit }) {
     child.stderr.on('data', (d) => { armIdle(); stderr += d.toString(); });
     child.on('error', (e) => {
       clearTimeout(idleTimer);
+      detach();
       reject(new Error(`Failed to start claude (${bin}): ${e.message}`));
     });
     child.on('close', (code) => {
       clearTimeout(idleTimer);
+      detach();
+      if (signal?.aborted) { resolve({ streamedAny, resultText }); return; } // Stop pressed — end quietly
       if (code === 0) resolve({ streamedAny, resultText });
       else reject(new Error(`Claude Code exited ${code}: ${stderr.trim().split('\n').pop() || 'failed'}`));
     });
@@ -204,7 +210,7 @@ export function handleMessage(msg, emit, alreadyStreamed) {
   return out;
 }
 
-export async function chat({ messages, system, options, images }, emit) {
+export async function chat({ messages, system, options, images }, emit, { signal } = {}) {
   const permissionMode = options.permissionMode || 'default';
   // Explicit project dir, else null → CLI runs in home (or WSL home).
   const cwd = options.workingDir ? path.resolve(options.workingDir) : null;
@@ -271,10 +277,10 @@ export async function chat({ messages, system, options, images }, emit) {
       args.push(...extra);
     }
   }
-  const run = runClaude({ prompt, args, cwd, emit });
+  const run = runClaude({ prompt, args, cwd, emit, signal });
   if (run === null) {
     cleanup(); // SDK fallback doesn't take images yet
-    return sdkChat({ messages, system, options }, emit);
+    return sdkChat({ messages, system, options }, emit, { signal });
   }
   try {
     const { streamedAny, resultText } = await run;
@@ -335,10 +341,17 @@ function loadSdk() {
   return sdkPromise;
 }
 
-async function sdkChat({ messages, system, options }, emit) {
+async function sdkChat({ messages, system, options }, emit, { signal } = {}) {
   const sdk = await loadSdk();
   if (!sdk) throw new Error(lastReason);
   const { query } = sdk;
+
+  // The SDK cancels the run when this controller aborts — forward the request signal.
+  const abortController = new AbortController();
+  if (signal) {
+    if (signal.aborted) abortController.abort();
+    else signal.addEventListener('abort', () => abortController.abort(), { once: true });
+  }
 
   const permissionMode = options.permissionMode || 'default';
   const cwd = options.workingDir ? path.resolve(options.workingDir) : os.homedir();
@@ -358,6 +371,7 @@ async function sdkChat({ messages, system, options }, emit) {
       permissionMode,
       includePartialMessages: true,
       canUseTool,
+      abortController,
       settingSources: options.useLocalConfig === false ? [] : ['user', 'project'],
       systemPrompt: system
         ? { type: 'preset', preset: 'claude_code', append: system }
@@ -366,10 +380,15 @@ async function sdkChat({ messages, system, options }, emit) {
       ...(process.env.CHATPANEL_MAX_TURNS ? { maxTurns: Number(process.env.CHATPANEL_MAX_TURNS) } : {}),
     },
   });
-  for await (const message of iterator) {
-    const r = handleMessage(message, emit, streamedAny);
-    if (r.streamed) streamedAny = true;
-    if (r.result != null) resultText = r.result;
+  try {
+    for await (const message of iterator) {
+      const r = handleMessage(message, emit, streamedAny);
+      if (r.streamed) streamedAny = true;
+      if (r.result != null) resultText = r.result;
+    }
+  } catch (e) {
+    if (signal?.aborted || abortController.signal.aborted) return; // Stop pressed — end quietly
+    throw e;
   }
   emit({ type: 'done', text: streamedAny ? '' : resultText });
 }

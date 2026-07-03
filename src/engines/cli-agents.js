@@ -34,8 +34,8 @@ function makeCliAgent(command, spec, notFoundHint) {
     listModels(options = {}) {
       return listSpecModels(command, spec.listModelsArgs, options.workingDir);
     },
-    chat(input, emit) {
-      return runSpec(resolvedSpec, input, emit);
+    chat(input, emit, opts) {
+      return runSpec(resolvedSpec, input, emit, opts);
     },
   };
 }

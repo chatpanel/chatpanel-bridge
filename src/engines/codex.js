@@ -15,6 +15,7 @@
 // the agent to point it at a real project.
 
 import { spawn, spawnSync } from 'node:child_process';
+import { killOnAbort } from '../proc.js';
 import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { existsSync, mkdirSync, symlinkSync, readFileSync } from 'node:fs';
 import os from 'node:os';
@@ -136,7 +137,7 @@ async function writeImages(images, tag) {
   return files;
 }
 
-export async function chat({ messages, system, options, images }, emit) {
+export async function chat({ messages, system, options, images }, emit, { signal } = {}) {
   ensureScratch();
   const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const outFile = path.join(os.tmpdir(), `chatpanel-codex-${tag}.txt`);
@@ -183,6 +184,8 @@ export async function chat({ messages, system, options, images }, emit) {
       return reject(new Error(`Failed to start codex: ${e.message}`));
     }
 
+    const detach = killOnAbort(child, signal); // Stop → SIGTERM/SIGKILL the codex child
+
     let stdout = '';
     let stderr = '';
     let idleTimer;
@@ -213,11 +216,13 @@ export async function chat({ messages, system, options, images }, emit) {
     child.stderr.on('data', (d) => { armIdle(); stderr += d.toString(); });
     child.on('error', (e) => {
       clearTimeout(idleTimer);
+      detach();
       cleanupImages();
       reject(e);
     });
     child.on('close', async (code) => {
       clearTimeout(idleTimer);
+      detach();
       let text = '';
       try {
         text = (await readFile(outFile, 'utf8')).trim();
@@ -226,6 +231,7 @@ export async function chat({ messages, system, options, images }, emit) {
       }
       unlink(outFile).catch(() => {});
       cleanupImages();
+      if (signal?.aborted) { resolve(); return; } // Stop pressed — end quietly, no error
       if (code === 0) {
         emit({ type: 'delta', text: text || '(no output)' });
         emit({ type: 'done', text: '' });

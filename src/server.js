@@ -330,9 +330,13 @@ async function handleChat(req, res) {
     if (!res.writableEnded) res.write(`data: ${JSON.stringify(obj)}\n\n`);
   };
 
-  // If the client disconnects, stop caring about late writes.
+  // If the client disconnects (Stop, or the panel closes), stop caring about late
+  // writes AND abort the run so the engine kills its CLI child instead of letting it
+  // finish in the background. Older engines ignore the signal (harmless); the spawn
+  // engines honor it via killOnAbort.
   let closed = false;
-  req.on('close', () => (closed = true));
+  const ac = new AbortController();
+  req.on('close', () => { closed = true; ac.abort(); });
 
   const safeEmit = (obj) => { if (!closed) emit(obj); };
 
@@ -358,6 +362,7 @@ async function handleChat(req, res) {
         images: Array.isArray(body.images) ? body.images : [],
       },
       safeEmit,
+      { signal: ac.signal },
     );
   } catch (e) {
     log('error', `${body.agent} chat failed: ${e?.message || e}`);

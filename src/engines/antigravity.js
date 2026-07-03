@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
+import { killOnAbort } from '../proc.js';
 
 const IDLE_MS = Number(process.env.CHATPANEL_AGY_TIMEOUT_MS) || 180_000;
 const SCRATCH = path.join(os.tmpdir(), 'chatpanel-agy-scratch');
@@ -78,7 +79,7 @@ function writeImages(images, dir) {
   return files;
 }
 
-export async function chat({ messages, system, options, images }, emit) {
+export async function chat({ messages, system, options, images }, emit, { signal } = {}) {
   try {
     mkdirSync(SCRATCH, { recursive: true });
   } catch {
@@ -113,6 +114,8 @@ export async function chat({ messages, system, options, images }, emit) {
       return reject(new Error(`Failed to start agy: ${e.message}`));
     }
 
+    const detach = killOnAbort(child, signal); // Stop → terminate the agy child
+
     let out = '';
     let err = '';
     let streamed = false;
@@ -137,12 +140,15 @@ export async function chat({ messages, system, options, images }, emit) {
     child.stderr.on('data', (d) => { armIdle(); err += d.toString(); });
     child.on('error', (e) => {
       clearTimeout(idleTimer);
+      detach();
       cleanup();
       reject(new Error(`Failed to start agy: ${e.message}`));
     });
     child.on('close', (code) => {
       clearTimeout(idleTimer);
+      detach();
       cleanup();
+      if (signal?.aborted) { resolve(); return; } // Stop pressed — end quietly
       if (code === 0) {
         if (!streamed) emit({ type: 'delta', text: out.trim() || '(no output)' });
         emit({ type: 'done', text: '' });

@@ -21,6 +21,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { resolveCommand, buildSpawnSpec, selfMcpStdio } from '../env.js';
 import { isProEntitled } from '../entitlement.js';
+import { killOnAbort } from '../proc.js';
 import { handleMessage } from './claude.js';
 import { buildCliPrompt } from './prompt.js';
 
@@ -360,18 +361,18 @@ export async function ensureStableMcpConfig(spec, cwd, label, emit, deps = {}) {
   throw new Error(`${label} browser-tool setup completed, but the MCP server is still not visible. Run: ${setupCommand}`);
 }
 
-export async function chat({ messages, system, options, images }, emit) {
+export async function chat({ messages, system, options, images }, emit, { signal } = {}) {
   // Pro gate — verified, not just UI. No valid signed entitlement → no run.
   if (!(await isProEntitled(options.entitlement))) {
     throw new Error('Custom agents require ChatPanel Pro. Upgrade in Settings to bring your own CLI agent.');
   }
-  return runSpec(options.custom || {}, { messages, system, options, images }, emit);
+  return runSpec(options.custom || {}, { messages, system, options, images }, emit, { signal });
 }
 
 // Run a CLI agent from a spec — SHARED by the Pro custom engine (gated in chat()
 // above) and the built-in CLI engines (pi/opencode/kiro). This never gates; the
 // built-in agents are bounded instead by the extension's free 1-agent limit.
-export async function runSpec(spec, { messages, system, options = {}, images }, emit) {
+export async function runSpec(spec, { messages, system, options = {}, images }, emit, { signal } = {}) {
   if (!spec.command) throw new Error('This agent has no command configured.');
 
   const resolved = resolveCommand(spec.command);
@@ -486,6 +487,8 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
       return reject(new Error(`Failed to start ${label}: ${e.message}`));
     }
 
+    const detach = killOnAbort(child, signal); // Stop → terminate the CLI child
+
     let stderr = '';
     let streamedAny = false;
     let resultText = '';
@@ -552,12 +555,15 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
     child.stderr.on('data', (d) => { armIdle(); stderr += d.toString(); });
     child.on('error', (e) => {
       clearTimeout(idleTimer);
+      detach();
       cleanup();
       reject(new Error(`Failed to start ${label}: ${e.message}`));
     });
     child.on('close', (code) => {
       clearTimeout(idleTimer);
+      detach();
       cleanup();
+      if (signal?.aborted) { resolve(); return; } // Stop pressed — end quietly
       if (code === 0) {
         emit({ type: 'done', text: streamedAny ? '' : resultText });
         resolve();
