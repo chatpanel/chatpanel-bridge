@@ -30,6 +30,7 @@ import { pi, opencode, kiro } from './engines/cli-agents.js';
 import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
 import { AGENT_CLIS, enrichPath, findAgentBin, resolveCommand } from './env.js';
+import { stripHidden } from './sanitize.js';
 import { checkForUpdate, selfUpdate } from './update.js';
 import { callLocalMcp } from './mcp-local.js';
 import { assertPublicHttpUrl, assertPublicWebUrl } from './ssrf.js';
@@ -108,10 +109,13 @@ function relayToolCall(session, name, input) {
 
 // The extension returns a string OR { text, image(dataURL) }; map to MCP content.
 function toMcpContent(result) {
+  // L5: de-steganographize tool-result TEXT before it flows back to the CLI/model —
+  // the bridge is a public localhost endpoint, so (like the prompt path) it must strip
+  // ASCII-smuggled / bidi Unicode from relayed results, not assume the caller did.
   if (result == null) return { content: [{ type: 'text', text: 'ok' }] };
-  if (typeof result === 'string') return { content: [{ type: 'text', text: result }] };
+  if (typeof result === 'string') return { content: [{ type: 'text', text: stripHidden(result) }] };
   const content = [];
-  if (result.text) content.push({ type: 'text', text: String(result.text) });
+  if (result.text) content.push({ type: 'text', text: stripHidden(String(result.text)) });
   if (typeof result.image === 'string') {
     const m = /^data:([^;]+);base64,(.+)$/s.exec(result.image);
     if (m) content.push({ type: 'image', data: m[2], mimeType: m[1] });
@@ -723,11 +727,16 @@ const server = createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && url.pathname === '/health') return handleHealth(res);
     if (req.method === 'GET' && url.pathname === '/debug') {
+      // L6: by default expose only version + agent AVAILABILITY (a boolean) — enough
+      // to diagnose "is codex installed?". The full home dir, $PATH, and resolved
+      // binary paths (which embed the username / home) leak environment detail, so
+      // they're opt-in behind CHATPANEL_BRIDGE_DEBUG=1. The extension doesn't read
+      // this route, so trimming it by default breaks nothing.
+      const verbose = /^(1|true|yes|on)$/i.test(process.env.CHATPANEL_BRIDGE_DEBUG || '');
       return json(res, 200, {
         version: VERSION,
-        home: os.homedir(),
-        agents: Object.fromEntries(AGENT_CLIS.map((name) => [name, findAgentBin(name) || null])),
-        path: process.env.PATH,
+        agents: Object.fromEntries(AGENT_CLIS.map((name) => [name, verbose ? (findAgentBin(name) || null) : !!findAgentBin(name)])),
+        ...(verbose ? { home: os.homedir(), path: process.env.PATH } : {}),
       });
     }
     if (req.method === 'POST' && url.pathname === '/chat') return handleChat(req, res);
