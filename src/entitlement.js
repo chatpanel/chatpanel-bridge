@@ -1,11 +1,7 @@
-// Offline Pro/Team entitlement verification — the HARD gate for paid features
-// (e.g. custom "bring your own CLI" agents).
-//
-// The license server (Cloudflare Worker) signs a compact entitlement token with
-// an ECDSA P-256 private key that lives ONLY there. The bridge ships the matching
-// PUBLIC key and verifies the signature locally — no network, no secret. A forked
-// client or a raw `curl` to the bridge can't forge entitlement without the
-// private key, so this is a real cryptographic gate, not a UI check.
+// Offline entitlement verification. The license server signs a compact entitlement
+// token with an ECDSA P-256 private key; the bridge ships the matching public key
+// and verifies the token's signature locally (no network). Gates Pro features such
+// as "bring your own" custom CLI agents.
 //
 // Token format (identical to the extension's, extension/js/license.js):
 //   token   = base64url(JSON payload) + "." + base64url(raw ECDSA signature)
@@ -44,9 +40,8 @@ function publicKey() {
 }
 
 // Verify a server entitlement token. Returns its payload, or null. Checks the
-// ECDSA signature (unforgeable without the private key), the token type, and
-// expiry. install_id binding is the extension's concern — for the bridge gate the
-// signature is what matters.
+// ECDSA signature, the token type, and expiry. install_id binding is handled by
+// the extension; the bridge checks the signature.
 export async function verifyEntitlement(token) {
   if (!token || typeof token !== 'string' || token.indexOf('.') < 0) return null;
   const [head, sig] = token.split('.');
@@ -70,8 +65,7 @@ export async function verifyEntitlement(token) {
     return null;
   }
   if (payload.typ !== 'ent') return null;
-  // exp is REQUIRED: a signed bearer token with no expiry would replay forever if
-  // captured. The worker always mints a finite exp, so demanding one is non-breaking.
+  // exp is required; the worker always mints a finite exp, so requiring one is non-breaking.
   if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) || Date.now() > payload.exp) return null;
   return payload;
 }

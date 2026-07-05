@@ -1,8 +1,6 @@
 // Built-in CLI agents — pi, opencode, kiro — that reuse the shared custom-engine
-// runner (runSpec) with a FIXED spec each. Unlike the Pro "custom" engine, these
-// are NOT entitlement-gated: they ship as built-ins, and the extension bounds
-// free users to a single usable agent (FREE_LIMITS.bridgeAgents). Bring-your-own
-// arbitrary CLIs stay Pro via custom.js.
+// runner (runSpec) with a fixed spec each. These are fixed built-in engines and are
+// not entitlement-gated; custom BYO CLIs are handled by custom.js.
 //
 // Specs come from each CLI's actual flags:
 //   pi       — pi -p "<prompt>"        · --model · @{path} images · --list-models

@@ -5,9 +5,7 @@
 // Windows cli.js+.cmd / WSL — same launcher as Claude), pipes the prompt in, and
 // streams output back.
 //
-// HARD Pro gate: a custom agent only runs if the request carries a valid,
-// server-signed entitlement token (verified OFFLINE here — no network). A forked
-// client or a raw POST can't forge it, so this is real gating, not UI.
+// Custom agents require a valid entitlement token, verified offline here (no network).
 //
 // Output formats:
 //   'text' (default) — stream stdout straight through as text deltas. Works for
@@ -97,7 +95,7 @@ function parseModelList(stdout) {
 
 // Unified model listing: run the agent's CONFIGURED list-models invocation
 // (e.g. pi `--list-models`, opencode `models`) and parse the output. Returns []
-// when not configured. Pro-gated like chat (it runs the user's CLI).
+// when not configured. Requires Pro (runs the user's CLI).
 export async function listModels(options = {}) {
   if (!(await isProEntitled(options.entitlement))) {
     throw new Error('Custom agents require ChatPanel Pro.');
@@ -106,8 +104,8 @@ export async function listModels(options = {}) {
   return listSpecModels(spec.command, spec.listModelsArgs, options.workingDir);
 }
 
-// Shared model listing (no Pro gate): run a CLI's list-models invocation and
-// parse it. Used by the Pro custom engine (gated above) AND built-in CLI agents.
+// Shared model listing: run a CLI's list-models invocation and parse it. Used by
+// the custom engine and the built-in CLI agents.
 export async function listSpecModels(command, listModelsArgs, workingDir) {
   const listArgs = String(listModelsArgs || '').trim();
   if (!command || !listArgs) return [];
@@ -363,16 +361,14 @@ export async function ensureStableMcpConfig(spec, cwd, label, emit, deps = {}) {
 }
 
 export async function chat({ messages, system, options, images }, emit, { signal } = {}) {
-  // Pro gate — verified, not just UI. No valid signed entitlement → no run.
+  // Require a valid signed entitlement before running.
   if (!(await isProEntitled(options.entitlement))) {
     throw new Error('Custom agents require ChatPanel Pro. Upgrade in Settings to bring your own CLI agent.');
   }
   return runSpec(options.custom || {}, { messages, system, options, images }, emit, { signal });
 }
 
-// Run a CLI agent from a spec — SHARED by the Pro custom engine (gated in chat()
-// above) and the built-in CLI engines (pi/opencode/kiro). This never gates; the
-// built-in agents are bounded instead by the extension's free 1-agent limit.
+// Run a CLI agent from a spec — shared by the custom engine and the built-in CLI engines.
 export async function runSpec(spec, { messages, system, options = {}, images }, emit, { signal } = {}) {
   if (!spec.command) throw new Error('This agent has no command configured.');
 
