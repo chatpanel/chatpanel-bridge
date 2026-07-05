@@ -22,6 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin, selfMcpStdio } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
+import { pushExtraArgs, FORBIDDEN } from './args.js';
 
 // Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
 // streaming never trips it — only true silence does. Override with
@@ -163,7 +164,8 @@ export async function chat({ messages, system, options, images }, emit, { signal
   // `-c key=value` parses value as TOML; JSON.stringify yields valid TOML here.
   args.push(...codexMcpConfigArgs(options.mcp));
   if (options.model) args.push('-m', options.model);
-  if (options.extraArgs) args.push(...String(options.extraArgs).split(/\s+/).filter(Boolean));
+  // Drop caller extras that would re-open the sandbox/approval boundary (shared sanitizer).
+  pushExtraArgs(args, options.extraArgs, FORBIDDEN.codex, emit);
   for (const f of imageFiles) args.push('-i', f); // attach images to the initial prompt
   args.push('-');
 

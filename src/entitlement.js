@@ -70,7 +70,9 @@ export async function verifyEntitlement(token) {
     return null;
   }
   if (payload.typ !== 'ent') return null;
-  if (payload.exp && Date.now() > payload.exp) return null;
+  // exp is REQUIRED: a signed bearer token with no expiry would replay forever if
+  // captured. The worker always mints a finite exp, so demanding one is non-breaking.
+  if (typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) || Date.now() > payload.exp) return null;
   return payload;
 }
 

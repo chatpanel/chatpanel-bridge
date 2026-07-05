@@ -831,6 +831,12 @@ function startServer() {
   });
   server.listen(PORT, HOST, async () => {
     log('info', `listening on http://${HOST}:${PORT}`);
+    // M7: a non-loopback bind disables the anti-DNS-rebinding Host check (hostAllowed
+    // returns true for any Host), so the only inbound guard left is the per-install
+    // token / extension Origin. Make that trade-off LOUD — it's rarely what you want.
+    if (!LOOPBACK_HOSTNAMES.has(HOST)) {
+      log('error', `⚠ SECURITY: bound to NON-LOOPBACK host ${HOST}. The anti-rebinding Host check is OFF, so any device that reaches this port (and any web page via a spoofed Host header) can drive local agents — gated only by the bridge token. Only do this on a trusted, firewalled network; prefer 127.0.0.1.`);
+    }
     for (const [, { engine, label, hidden }] of Object.entries(ENGINES)) {
       if (hidden) continue;
       const a = await engine.available().catch(() => ({ ok: false }));

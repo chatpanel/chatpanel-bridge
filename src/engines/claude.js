@@ -20,6 +20,7 @@ import path from 'node:path';
 import { resolveClaude, buildSpawnSpec, isCompiledBinary, selfMcpStdio } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
 import { killOnAbort } from '../proc.js';
+import { pushExtraArgs, FORBIDDEN } from './args.js';
 
 // Write base64 data-URL images to temp files. Claude Code reads them with its
 // Read tool (which feeds images to the model as vision), so we just reference the
@@ -265,18 +266,9 @@ export async function chat({ messages, system, options, images }, emit, { signal
     }: ${imageFiles.join(', ')}`;
   }
 
-  if (options.extraArgs) {
-    const extra = String(options.extraArgs).split(/\s+/).filter(Boolean);
-    // Never let caller-supplied extras re-open the read-only boundary the mode
-    // flags above establish. If ANY security-sensitive flag is present, drop the
-    // whole extraArgs (these tokens take values, so partial filtering is unsafe).
-    const FORBIDDEN = /^--?(permission-mode|allowed-?tools|disallowed-?tools|dangerously|add-dir|mcp-config|setting-sources|permission-prompt-tool)/i;
-    if (extra.some((t) => FORBIDDEN.test(t))) {
-      emit({ type: 'status', text: '(ignored unsafe extraArgs)' });
-    } else {
-      args.push(...extra);
-    }
-  }
+  // Never let caller-supplied extras re-open the read-only boundary the mode flags
+  // above establish (shared sanitizer — see args.js).
+  pushExtraArgs(args, options.extraArgs, FORBIDDEN.claude, emit);
   const run = runClaude({ prompt, args, cwd, emit, signal });
   if (run === null) {
     cleanup(); // SDK fallback doesn't take images yet

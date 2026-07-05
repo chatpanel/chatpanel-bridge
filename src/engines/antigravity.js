@@ -17,6 +17,7 @@ import path from 'node:path';
 import { findAgentBin } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
 import { killOnAbort } from '../proc.js';
+import { pushExtraArgs, FORBIDDEN } from './args.js';
 
 const IDLE_MS = Number(process.env.CHATPANEL_AGY_TIMEOUT_MS) || 180_000;
 const SCRATCH = path.join(os.tmpdir(), 'chatpanel-agy-scratch');
@@ -103,7 +104,8 @@ export async function chat({ messages, system, options, images }, emit, { signal
   const args = ['-p', prompt];
   if (options.model) args.push('--model', options.model);
   if (options.permissionMode === 'bypassPermissions') args.push('--dangerously-skip-permissions');
-  if (options.extraArgs) args.push(...String(options.extraArgs).split(/\s+/).filter(Boolean));
+  // Drop caller extras that would auto-approve tools (shared sanitizer).
+  pushExtraArgs(args, options.extraArgs, FORBIDDEN.antigravity, emit);
 
   await new Promise((resolve, reject) => {
     let child;

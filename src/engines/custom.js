@@ -24,6 +24,7 @@ import { isProEntitled } from '../entitlement.js';
 import { killOnAbort } from '../proc.js';
 import { handleMessage } from './claude.js';
 import { buildCliPrompt } from './prompt.js';
+import { pushExtraArgs, FORBIDDEN } from './args.js';
 
 // Write base64 data-URL images to temp files so a custom CLI can take them via
 // its configured `imageArg` template (e.g. "-i {path}", "@{path}"). Returns paths.
@@ -395,9 +396,13 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
       ? String(spec.args).split(/\s+/).filter(Boolean)
       : [];
   // User-supplied extra CLI flags (Settings → agent → "Extra arguments"), placed
-  // right after the base args/subcommand — e.g. opencode `run --format json
-  // --dangerously-skip-permissions`. Applies to every built-in & custom CLI agent.
-  if (options.extraArgs) args.push(...String(options.extraArgs).split(/\s+/).filter(Boolean));
+  // right after the base args/subcommand. Sanitized (shared helper): escalation flags
+  // (--dangerously*, --skip-permissions, --trust-all-tools, --no-sandbox …) are dropped
+  // from the EXTRA args so an injected value can't unlock tools. The built-in agents'
+  // intentional autonomy flags live in their BASE spec (cli-agents.js), not here, so
+  // they're unaffected; a custom CLI that genuinely needs such a flag should carry it
+  // in its configured command/args, not the extra-args field.
+  pushExtraArgs(args, options.extraArgs, FORBIDDEN.custom, emit);
   // Inject the selected model via the agent's CONFIGURED model-arg template
   // (e.g. "--model {model}" or, for opencode, "-m {model}" with provider/model).
   // Without a template we can't know how this CLI takes a model, so options.model
