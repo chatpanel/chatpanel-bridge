@@ -1,88 +1,35 @@
-// SSRF guard for the /mcp-remote proxy.
+// SSRF guard for the bridge's outbound proxies (/mcp-remote, /fetch-title).
 //
-// The bridge proxies ONE JSON-RPC message to a remote MCP server *from this
-// machine* (no browser Origin header), so the extension can reach servers that
-// reject browser origins. That route is already privileged — it requires the
-// extension origin or the per-install bridge token, so a random web page cannot
-// drive it. This guard is the second layer: even when driven by the extension,
-// the bridge must not become a relay that a prompt-injected agent could point at
-// cloud metadata or use to sweep the LAN.
+// The host CLASSIFICATION (what is loopback / cloud-metadata / RFC1918 / CGNAT /
+// ULA / link-local / .local) now lives in ONE shared place — src/net.js, a vendored
+// copy of @chatpanel/pii/net.js, the same classifier the gateway and extension use.
+// This file keeps only the bridge's two POLICIES + their exact error messages, so a
+// security guard can't drift between the direct client path and the proxied path.
+// See docs/secure-data-plane.md.
 //
-// Policy:
-//   • Loopback (127.0.0.0/8, ::1, localhost, *.localhost) → ALLOWED.
-//     It's the user's own host — the same place the bridge runs, and a place the
-//     extension can already fetch DIRECTLY. Proxying it grants no new reach; it
-//     only drops the browser Origin header (the whole point of "via bridge").
-//     Localhost MCP servers are the common case.
-//   • Cloud instance metadata (169.254.169.254) → ALWAYS BLOCKED.
-//     This is the sharpest SSRF target (credential theft) and is blocked even
-//     when private hosts are opted in.
-//   • Everything else private/internal (RFC1918, CGNAT, link-local, IPv6 ULA,
-//     0.0.0.0, ::, *.local) → BLOCKED, unless the operator opts in with
-//     CHATPANEL_BRIDGE_ALLOW_PRIVATE_HOSTS=1 (for reaching an MCP server on
-//     another machine on a trusted LAN).
-//   • Non-http(s) schemes → BLOCKED.
+// Two policies:
+//   • /mcp-remote (assertPublicHttpUrl): loopback ALLOWED (the user's own MCP
+//     servers — the whole point of "via bridge"), cloud metadata ALWAYS blocked,
+//     every other private/LAN range blocked UNLESS the operator opts in with
+//     CHATPANEL_BRIDGE_ALLOW_PRIVATE_HOSTS=1 (reaching an MCP server on a trusted LAN).
+//   • /fetch-title (assertPublicWebUrl): STRICTER — a page fetch has no business
+//     touching loopback OR any private host, so loopback + metadata + every private
+//     range are blocked unconditionally (the opt-in is deliberately NOT honored).
 //
-// The same checks run on the initial URL AND after any redirect.
+// Non-http(s) schemes are blocked in both. Run the assert on the initial URL AND
+// after every redirect hop.
+
+import { isLoopbackHost, isBlockedHost } from './net.js';
+
+export { isLoopbackHost };
 
 const ALLOW_PRIVATE_HOSTS = /^(1|true|yes|on)$/i.test(
   process.env.CHATPANEL_BRIDGE_ALLOW_PRIVATE_HOSTS || '',
 );
 
-function ipv4(h) {
-  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (!m) return null;
-  const o = m.slice(1).map(Number);
-  if (o.some((n) => n > 255)) return null;
-  return o;
-}
-
-// Loopback = this host's own services. Reachable by the extension directly, so
-// allowing the bridge to reach it adds no capability.
-export function isLoopbackHost(hostname) {
-  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (!h) return false;
-  if (h === 'localhost' || h.endsWith('.localhost')) return true;
-  if (h === '::1') return true;
-  const o = ipv4(h);
-  return !!(o && o[0] === 127);
-}
-
-// Cloud instance metadata — credential-theft vector. Always blocked.
-function isMetadataHost(hostname) {
-  const o = ipv4(hostname);
-  return !!(o && o[0] === 169 && o[1] === 254);
-}
-
+// MCP-proxy policy: loopback ok, metadata never, other private only when opted in.
 export function isBlockedHttpHost(hostname) {
-  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (!h) return true;
-  if (isLoopbackHost(h)) return false; // user's own host — allowed
-  if (isMetadataHost(h)) return true; // never proxy cloud metadata, even when private is opted in
-  if (ALLOW_PRIVATE_HOSTS) return false; // operator opted in to LAN/private targets
-
-  // Default deny for the rest of the private/internal space.
-  if (h.endsWith('.local')) return true; // mDNS / LAN
-  if (
-    h === '::' ||
-    h.startsWith('fc') ||
-    h.startsWith('fd') || // IPv6 ULA
-    h.startsWith('fe8') ||
-    h.startsWith('fe9') ||
-    h.startsWith('fea') ||
-    h.startsWith('feb') // IPv6 link-local
-  ) {
-    return true;
-  }
-  const o = ipv4(h);
-  if (o) {
-    const [a, b] = o;
-    if (a === 0 || a === 10) return true; // this-host / RFC1918
-    if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
-    if (a === 192 && b === 168) return true; // RFC1918
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-  }
-  return false;
+  return isBlockedHost(hostname, { allowLoopback: true, allowPrivate: ALLOW_PRIVATE_HOSTS });
 }
 
 export function assertPublicHttpUrl(u) {
@@ -101,41 +48,9 @@ export function assertPublicHttpUrl(u) {
   return parsed;
 }
 
-// STRICTER guard for fetching arbitrary WEB pages (the /fetch-title route). Unlike the MCP proxy,
-// a page fetch has NO legitimate reason to reach the user's own loopback services or any LAN /
-// private host — those would be pure SSRF (port-scan the LAN, hit a localhost admin panel, read
-// cloud metadata). So loopback + metadata + every private/internal range are blocked
-// UNCONDITIONALLY here; the CHATPANEL_BRIDGE_ALLOW_PRIVATE_HOSTS opt-in (meant for reaching a LAN
-// MCP server, a different trust context) is deliberately NOT honored. Only genuinely public
-// http(s) hosts pass. Re-run this on every redirect hop, not just the initial URL.
+// Web-fetch policy (stricter): block loopback + metadata + all private, always.
 export function isDisallowedWebHost(hostname) {
-  const h = String(hostname || '').toLowerCase().replace(/^\[|\]$/g, '');
-  if (!h) return true;
-  if (isLoopbackHost(h)) return true; // localhost/127.x — a page fetch must never touch it
-  if (isMetadataHost(h)) return true; // 169.254.169.254 — credential theft
-  if (h.endsWith('.local')) return true; // mDNS / LAN
-  if (
-    h === '::' ||
-    h.startsWith('fc') ||
-    h.startsWith('fd') || // IPv6 ULA
-    h.startsWith('fe8') ||
-    h.startsWith('fe9') ||
-    h.startsWith('fea') ||
-    h.startsWith('feb') // IPv6 link-local
-  ) {
-    return true;
-  }
-  const o = ipv4(h);
-  if (o) {
-    const [a, b] = o;
-    if (a === 0 || a === 10) return true; // this-host / RFC1918
-    if (a === 127) return true; // loopback (also caught above; explicit for clarity)
-    if (a === 169 && b === 254) return true; // link-local (incl. metadata)
-    if (a === 172 && b >= 16 && b <= 31) return true; // RFC1918
-    if (a === 192 && b === 168) return true; // RFC1918
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-  }
-  return false;
+  return isBlockedHost(hostname, { allowLoopback: false, allowPrivate: false });
 }
 
 export function assertPublicWebUrl(u) {
