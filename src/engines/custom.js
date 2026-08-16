@@ -20,9 +20,9 @@ import path from 'node:path';
 import { resolveCommand, buildSpawnSpec, selfMcpStdio } from '../env.js';
 import { isProEntitled } from '../entitlement.js';
 import { killOnAbort } from '../proc.js';
-import { handleMessage } from './claude.js';
 import { buildCliPrompt } from './prompt.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
+import { createStreamParser, STREAM_FORMATS, stripAnsi } from './stream-formats.js';
 
 // Write base64 data-URL images to temp files so a custom CLI can take them via
 // its configured `imageArg` template (e.g. "-i {path}", "@{path}"). Returns paths.
@@ -60,11 +60,8 @@ function imageTokensFor(imageArg, files) {
 // CHATPANEL_CUSTOM_TIMEOUT_MS (ms).
 const IDLE_MS = Number(process.env.CHATPANEL_CUSTOM_TIMEOUT_MS) || 180_000;
 
-// Many CLIs emit ANSI colour/escape codes even when piped (kiro-cli does), which
-// leak into the answer as `\x1b[38;5;141m…`. Strip them from text output. (We
-// also set NO_COLOR on the child env, but this is the robust backstop.)
-const ANSI_RE = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
-const stripAnsi = (s) => s.replace(ANSI_RE, '');
+// ANSI stripping moved to stream-formats.js (imported above), which is where
+// text output is actually rendered - one implementation for every format.
 const OPENCODE_STABLE_MCP_URL = 'http://127.0.0.1:4319/mcp';
 const CHATPANEL_STABLE_MCP_URL = 'http://127.0.0.1:4319/mcp';
 
@@ -109,22 +106,30 @@ export async function listModels(options = {}) {
 export async function listSpecModels(command, listModelsArgs, workingDir) {
   const listArgs = String(listModelsArgs || '').trim();
   if (!command || !listArgs) return [];
+  const stdout = await runForStdout(command, listArgs.split(/\s+/).filter(Boolean), workingDir);
+  return parseModelList(stdout);
+}
+
+// Run a CLI to completion and return its stdout. Shared by every "ask the CLI
+// something" path (model listing and the per-agent listModels overrides) so the
+// spawn/resolve/timeout handling exists once.
+export async function runForStdout(command, argvIn, workingDir, timeoutMs = 20000) {
+  if (!command) return '';
   const resolved = resolveCommand(command);
   if (!resolved) throw new Error(`Couldn't find "${command}".`);
   const cwd = workingDir ? path.resolve(workingDir) : null;
-  const [bin, argv, opts] = buildSpawnSpec(resolved, listArgs.split(/\s+/).filter(Boolean), cwd);
+  const [bin, argv, opts] = buildSpawnSpec(resolved, argvIn, cwd);
   opts.env = { ...(opts.env || process.env), NO_COLOR: '1', CLICOLOR: '0' };
-  const stdout = await new Promise((resolve, reject) => {
+  return new Promise((resolve, reject) => {
     let child;
     try { child = spawn(bin, argv, opts); } catch (e) { return reject(new Error(`Failed to start ${command}: ${e.message}`)); }
     let out = '';
-    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('Listing models timed out.')); }, 20000);
+    const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error(`${command} timed out.`)); }, timeoutMs);
     child.stdout.on('data', (d) => (out += d.toString()));
     child.on('error', (e) => { clearTimeout(timer); reject(new Error(`Failed to start ${command}: ${e.message}`)); });
     child.on('close', () => { clearTimeout(timer); resolve(out); });
     try { child.stdin.end(); } catch { /* some CLIs don't read stdin */ }
   });
-  return parseModelList(stdout);
 }
 
 function mcpToolSpecs(mcp) {
@@ -380,7 +385,10 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
   const prompt = buildCliPrompt(messages, system);
   let cwd = options.workingDir ? path.resolve(options.workingDir) : null;
   const label = spec.label || spec.command;
-  const fmt = ['claude-stream-json', 'opencode-json'].includes(spec.format) ? spec.format : 'text';
+  // Output dialect — resolved against the stream-format registry, so a new agent
+  // brings a format by NAME instead of a new branch in this runner. Unknown /
+  // absent names fall back to plain text.
+  const fmt = Object.hasOwn(STREAM_FORMATS, spec.format) ? spec.format : 'text';
 
   // Args: either a real array or a space-split string. With promptVia:'arg' we
   // substitute {prompt} (or append it if there's no placeholder); otherwise the
@@ -398,7 +406,10 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
   // intentional autonomy flags live in their BASE spec (cli-agents.js), not here, so
   // they're unaffected; a custom CLI that genuinely needs such a flag should carry it
   // in its configured command/args, not the extra-args field.
-  pushExtraArgs(args, options.extraArgs, FORBIDDEN.custom, emit);
+  // Built-in specs may name a stricter set than the generic `custom` one, since
+  // each CLI's escalation flags are spelled differently (Copilot's --allow-all-*
+  // family isn't matched by the generic pattern).
+  pushExtraArgs(args, options.extraArgs, FORBIDDEN[spec.forbidden] || FORBIDDEN.custom, emit);
   // Inject the selected model via the agent's CONFIGURED model-arg template
   // (e.g. "--model {model}" or, for opencode, "-m {model}" with provider/model).
   // Without a template we can't know how this CLI takes a model, so options.model
@@ -412,6 +423,16 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
     // keep the subcommand first — `opencode -m X run` makes `run` look like a
     // project path, so it never loads opencode.json / its MCP servers.
     args = [...args, ...injected];
+  }
+  // Permission mode -> flags, declared per agent as
+  //   permissionArgs: { default: [...], acceptEdits: [...], bypassPermissions: [...] }
+  // Agents whose autonomy flags are unconditional keep them in `args`; this is for
+  // CLIs (Copilot) with a real permission surface, so the extension's existing
+  // per-agent Permission mode actually means something. Unknown mode -> `default`.
+  if (spec.permissionArgs) {
+    const mode = String(options.permissionMode || 'default');
+    const perm = spec.permissionArgs[mode] || spec.permissionArgs.default || [];
+    args = [...args, ...perm.map(String)];
   }
   // Images: write to temp files, expand the agent's imageArg template, then place
   // the tokens. An explicit {images} placeholder in args wins; otherwise they go
@@ -445,6 +466,28 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
   // Some CLIs only load MCP from their persistent config, so ensure that stable
   // /mcp endpoint is present before letting the agent answer with no tools.
   if (options.mcp?.url) await ensureStableMcpConfig(spec, cwd, label, emit);
+
+  // Model via a CONFIG-PATCH FILE, for agents with no --model flag (dsh takes the
+  // model as a Cordis config overlay: `--patch <file>` replacing one row by id).
+  // `build` is a function, so this can only come from a built-in spec — a custom
+  // BYO agent's spec arrives as JSON over HTTP and cannot carry one.
+  if (options.model && typeof spec.modelPatch?.build === 'function') {
+    // Keep the value to a conservative id charset: it lands in a config file the
+    // agent parses, so no quotes/newlines/path characters.
+    const safeModel = /^[A-Za-z0-9][\w.:-]{0,79}$/.test(String(options.model)) ? String(options.model) : '';
+    if (safeModel) {
+      const patchFile = path.join(os.tmpdir(), `chatpanel-modelpatch-${tag}.yml`);
+      await writeFile(patchFile, spec.modelPatch.build(safeModel));
+      mcpFiles.push(patchFile); // cleaned up with the other temp files
+      const tmpl = String(spec.modelPatch.arg || '--patch {file}');
+      const tokens = tmpl.includes('{file}')
+        ? tmpl.replaceAll('{file}', patchFile).split(/\s+/).filter(Boolean)
+        : [...tmpl.split(/\s+/).filter(Boolean), patchFile];
+      // PREPEND: these are launcher flags and must precede the task text (same
+      // reason mcpArg prepends).
+      args = [...tokens, ...args];
+    }
+  }
 
   const imageTokens = imageTokensFor(spec.imageArg, imageFiles);
   let placedImages = false;
@@ -491,9 +534,9 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
     const detach = killOnAbort(child, signal); // Stop → terminate the CLI child
 
     let stderr = '';
-    let streamedAny = false;
-    let resultText = '';
-    let jsonBuf = '';
+    // The output dialect is a plugin (stream-formats.js); it owns line buffering,
+    // "did anything stream", and the fallback answer text.
+    const parser = createStreamParser(fmt, emit);
 
     let idleTimer;
     const armIdle = () => {
@@ -508,50 +551,7 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
 
     child.stdout.on('data', (d) => {
       armIdle();
-      const s = d.toString();
-      if (fmt === 'claude-stream-json') {
-        jsonBuf += s;
-        let nl;
-        while ((nl = jsonBuf.indexOf('\n')) >= 0) {
-          const line = jsonBuf.slice(0, nl).trim();
-          jsonBuf = jsonBuf.slice(nl + 1);
-          if (!line.startsWith('{')) continue;
-          let msg;
-          try {
-            msg = JSON.parse(line);
-          } catch {
-            continue;
-          }
-          const r = handleMessage(msg, emit, streamedAny);
-          if (r.streamed) streamedAny = true;
-          if (r.result != null) resultText = r.result;
-        }
-      } else if (fmt === 'opencode-json') {
-        // opencode `run --format json` emits newline-delimited events: text parts,
-        // tool/tool_use, and errors. Extract the answer text + surface tools/errors.
-        jsonBuf += s;
-        let nl;
-        while ((nl = jsonBuf.indexOf('\n')) >= 0) {
-          const line = jsonBuf.slice(0, nl).trim();
-          jsonBuf = jsonBuf.slice(nl + 1);
-          if (!line.startsWith('{')) continue;
-          let ev;
-          try { ev = JSON.parse(line); } catch { continue; }
-          if (ev.type === 'text' && ev.part?.text) {
-            streamedAny = true;
-            emit({ type: 'delta', text: ev.part.text });
-          } else if (ev.type === 'tool' || ev.type === 'tool_use') {
-            const p = ev.part || {};
-            emit({ type: 'tool', name: p.tool || p.name || p.type || 'tool', summary: '' });
-          } else if (ev.type === 'error') {
-            const msg = ev.error?.data?.message || ev.error?.message || ev.error?.name || 'error';
-            emit({ type: 'status', text: String(msg).slice(0, 300) });
-          }
-        }
-      } else {
-        streamedAny = true;
-        emit({ type: 'delta', text: stripAnsi(s) });
-      }
+      parser.push(d.toString());
     });
     child.stderr.on('data', (d) => { armIdle(); stderr += d.toString(); });
     child.on('error', (e) => {
@@ -566,7 +566,7 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
       cleanup();
       if (signal?.aborted) { resolve(); return; } // Stop pressed — end quietly
       if (code === 0) {
-        emit({ type: 'done', text: streamedAny ? '' : resultText });
+        emit({ type: 'done', text: parser.streamed ? '' : parser.finish() });
         resolve();
       } else {
         reject(new Error(`${label} exited ${code}: ${stderr.trim().split('\n').pop() || 'failed'}`));

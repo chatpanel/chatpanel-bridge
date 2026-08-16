@@ -23,6 +23,11 @@ export const FORBIDDEN = {
   // Custom runs an arbitrary CLI, so only clearly-dangerous LONG flags are blocked
   // (no short-flag guesses that might collide with a benign tool option).
   custom: /^--(dangerously[\w-]*|skip-permissions|trust-all-?tools|no-sandbox|bypass|yolo|full-auto|permission-mode|allowed-?tools|disallowed-?tools|mcp-config)\b/i,
+  // Copilot's escalation surface is its own family of --allow-* flags (which the
+  // `custom` pattern above does NOT cover: "allow-all-tools" != "allowed-tools").
+  // Also block re-targeting the working dir (-C / --add-dir) and injecting MCP
+  // servers, since the engine sets those deliberately per turn.
+  copilot: /^(-C)$|^--(allow-all[\w-]*|allow-tool|allow-url|allow-path|yolo|add-dir|additional-mcp-config|disable-builtin-mcps|deny-tool|deny-url|autopilot|mode)\b/i,
 };
 
 // Returns { args, blocked }. `blocked:true` => the whole extraArgs was dropped.

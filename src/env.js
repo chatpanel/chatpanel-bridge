@@ -14,7 +14,7 @@ let enriched = false;
 
 // The agent CLIs the bridge shells out to. Claude has its own richer resolution
 // (resolveClaude: native / cli.js / WSL / SDK) below.
-export const AGENT_CLIS = ['codex', 'claude', 'agy', 'pi', 'opencode', 'kiro-cli'];
+export const AGENT_CLIS = ['codex', 'claude', 'agy', 'pi', 'opencode', 'kiro-cli', 'copilot', 'dsh'];
 
 // Is `name` executable somewhere on the current PATH?
 function onPath(name) {
