@@ -11,6 +11,7 @@ import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 
 let enriched = false;
+let envEnriched = false;
 
 // The agent CLIs the bridge shells out to. Claude has its own richer resolution
 // (resolveClaude: native / cli.js / WSL / SDK) below.
@@ -419,6 +420,64 @@ export function commandCandidateFiles(name, home = os.homedir(), platform = proc
     ...agentInstallDirs(home, platform, env),
   ]).flatMap((dir) => withWindowsExts(p.join(dir, name), platform));
   return unique([...fromDirs, ...agentCandidateBins(name, home, platform, env)]);
+}
+
+// Agent credentials a LaunchAgent/systemd unit does NOT inherit.
+//
+// enrichPath() repairs the minimal PATH a service gets; this is the same problem
+// one layer up. A CLI that authenticates from a FILE (claude, codex, copilot:
+// ~/.copilot) works fine under the service, but one that reads an API key from
+// the ENVIRONMENT (dsh -> DEEPSEEK_API_KEY) fails with a missing-credential
+// error that looks like a ChatPanel bug — the launchd job's environment is just
+// SSH_AUTH_SOCK and a bare PATH.
+//
+// So: ask the user's login shell for a NARROW allowlist of agent credential
+// variables and fill in only the ones we don't already have. These are the
+// user's own credentials, on their own machine, handed to CLIs the user
+// configured ChatPanel to launch — exactly what would happen had they run the
+// CLI from their terminal. Values are never logged, and /debug never dumps the
+// environment (it exposes only PATH/home, and only under CHATPANEL_BRIDGE_DEBUG).
+const AGENT_ENV_KEYS = [
+  'DEEPSEEK_API_KEY', 'DSH_HOME',
+  'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL',
+  'OPENAI_API_KEY', 'OPENAI_BASE_URL', 'OPENAI_API_BASE',
+  'GEMINI_API_KEY', 'GOOGLE_API_KEY',
+  'OPENROUTER_API_KEY', 'GROQ_API_KEY', 'XAI_API_KEY', 'MISTRAL_API_KEY',
+];
+
+export function enrichAgentEnv() {
+  if (envEnriched) return;
+  envEnriched = true;
+  if (process.platform === 'win32') return; // service env is inherited there
+
+  const missing = AGENT_ENV_KEYS.filter((k) => !process.env[k]);
+  if (!missing.length) return;
+  try {
+    const shell = process.env.SHELL || '/bin/zsh';
+    // Emit NAME\tVALUE for each var that is actually set; trailing `true` keeps
+    // the exit status clean when the last test fails.
+    const script = `${missing
+      .map((k) => `[ -n "\${${k}:-}" ] && printf '%s\\t%s\\n' ${k} "\$${k}"`)
+      .join('; ')}; true`;
+    // -lic, not -lc: these keys are typically exported from ~/.zshrc (or ~/.bashrc),
+    // which a LOGIN-only shell does NOT source — that's interactive-only. TERM=dumb
+    // keeps prompt/banner noise down, and the parser below ignores any line that
+    // isn't a clean NAME<TAB>VALUE, so rc-file chatter is harmless.
+    const r = spawnSync(shell, ['-lic', script], {
+      encoding: 'utf8',
+      timeout: 6000,
+      env: { ...process.env, TERM: 'dumb' },
+    });
+    for (const line of String(r.stdout || '').split('\n')) {
+      const i = line.indexOf('\t');
+      if (i <= 0) continue;
+      const key = line.slice(0, i).trim();
+      const value = line.slice(i + 1);
+      if (AGENT_ENV_KEYS.includes(key) && !process.env[key] && value) process.env[key] = value;
+    }
+  } catch {
+    /* no login shell / timeout — agents that need a file-based login still work */
+  }
 }
 
 export function enrichPath() {

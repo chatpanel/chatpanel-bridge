@@ -29,7 +29,7 @@ import * as antigravity from './engines/antigravity.js';
 import { pi, opencode, kiro, copilot, deepseek } from './engines/cli-agents.js';
 import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
-import { AGENT_CLIS, enrichPath, findAgentBin, resolveCommand } from './env.js';
+import { AGENT_CLIS, enrichPath, enrichAgentEnv, findAgentBin, resolveCommand } from './env.js';
 import { stripHidden } from './sanitize.js';
 import { checkForUpdate, selfUpdate } from './update.js';
 import { callLocalMcp } from './mcp-local.js';
@@ -38,7 +38,7 @@ import { assertPublicHttpUrl, assertPublicWebUrl } from './ssrf.js';
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.23';
+const VERSION = '0.10.24';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -828,6 +828,7 @@ function runMcpStdioProxy(url) {
 
 function startServer() {
   enrichPath(); // so codex/agy (Antigravity) are found even under a minimal service PATH
+  enrichAgentEnv(); // and so env-authenticated CLIs (dsh) have their key under launchd
   ensureToken(); // per-install bearer token for privileged routes (defense-in-depth)
   // Fail LOUD on a port clash. The bridge binds a FIXED 4319 so the extension always
   // finds it; if it's taken, say how to recover instead of dying on a raw stack trace.
