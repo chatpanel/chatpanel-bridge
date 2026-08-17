@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
-import { killOnAbort } from '../proc.js';
+import { killOnAbort, spawnGroupOpts } from '../proc.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
 
 const IDLE_MS = Number(process.env.CHATPANEL_AGY_TIMEOUT_MS) || 180_000;
@@ -110,7 +110,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
   await new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn('agy', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env } });
+      child = spawn('agy', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env }, ...spawnGroupOpts });
     } catch (e) {
       cleanup();
       return reject(new Error(`Failed to start agy: ${e.message}`));

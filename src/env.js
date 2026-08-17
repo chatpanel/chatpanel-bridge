@@ -6,6 +6,7 @@
 // by (1) asking your login shell for its PATH and (2) adding common bin dirs.
 
 import os from 'node:os';
+import { spawnGroupOpts } from './proc.js';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
@@ -236,9 +237,15 @@ export function buildSpawnSpec(spec, args, cwd) {
       if (wslCwd) pre.push('--cd', wslCwd); // else: run in WSL home
     }
     const argv = [...pre, '-e', 'bash', '-lic', `exec ${spec.command} "$@"`, 'chatpanel', ...args];
-    return ['wsl.exe', argv, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env, windowsHide: true }];
+    return ['wsl.exe', argv, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env, windowsHide: true, ...spawnGroupOpts }];
   }
-  const opts = { cwd: cwd || os.homedir(), stdio: ['pipe', 'pipe', 'pipe'], env: process.env, windowsHide: true };
+  // Every spawned CLI leads its own process group, so Stop can signal the whole tree. An
+  // agent CLI is not one process — it runs shell commands and tools of its own — and killing
+  // only the pid we hold leaves those running after the user has stopped the turn.
+  const opts = {
+    cwd: cwd || os.homedir(), stdio: ['pipe', 'pipe', 'pipe'], env: process.env, windowsHide: true,
+    ...spawnGroupOpts,
+  };
   if (spec.kind === 'script') return [process.execPath, [spec.script, ...args], opts];
   if (spec.kind === 'cmd') return ['cmd.exe', ['/d', '/s', '/c', spec.bin, ...args], opts];
   return [spec.bin, args, opts]; // native

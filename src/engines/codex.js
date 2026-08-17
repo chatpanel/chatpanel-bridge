@@ -15,7 +15,7 @@
 // the agent to point it at a real project.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { killOnAbort } from '../proc.js';
+import { killOnAbort, spawnGroupOpts } from '../proc.js';
 import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { existsSync, mkdirSync, symlinkSync, readFileSync } from 'node:fs';
 import os from 'node:os';
@@ -180,7 +180,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
   await new Promise((resolve, reject) => {
     let child;
     try {
-      child = spawn('codex', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env });
+      child = spawn('codex', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env, ...spawnGroupOpts });
     } catch (e) {
       cleanupImages();
       return reject(new Error(`Failed to start codex: ${e.message}`));
