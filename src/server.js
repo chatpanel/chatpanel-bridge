@@ -34,6 +34,7 @@ import { stripHidden } from './sanitize.js';
 import { checkForUpdate, selfUpdate } from './update.js';
 import { callLocalMcp } from './mcp-local.js';
 import { assertPublicHttpUrl, assertPublicWebUrl } from './ssrf.js';
+import { startRun, endRun, cancelRun, cancelAll, activeRuns } from './runs.js';
 
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
@@ -341,10 +342,22 @@ async function handleChat(req, res) {
   // finish in the background. Older engines ignore the signal (harmless); the spawn
   // engines honor it via killOnAbort.
   let closed = false;
-  const ac = new AbortController();
-  req.on('close', () => { closed = true; ac.abort(); });
+  // A run id the client can cancel BY NAME. Emitted first, before anything else, so Stop
+  // works from the first millisecond rather than from whenever the engine gets going.
+  const runId = `run_${Math.random().toString(36).slice(2, 10)}`;
+  const run = startRun(runId);
+  const ac = { signal: run.signal, abort: () => run.cancel('client') };
+  // BOTH close events. On a request whose body was already consumed, req 'close' does not
+  // reliably signal a client disconnect — res 'close' does. Keeping both means a panel that
+  // crashes or is closed still tears the CLI down, while the Stop button no longer depends
+  // on either of them.
+  const onGone = () => { closed = true; run.cancel('disconnected'); };
+  req.on('close', onGone);
+  res.on('close', onGone);
+  res.on('error', onGone);
 
   const safeEmit = (obj) => { if (!closed) emit(obj); };
+  emit({ type: 'run', id: runId });
 
   // Browser-tools relay: when the extension sends page-tool specs, host an MCP
   // server for this turn and tell the engine to point the CLI at it.
@@ -374,9 +387,26 @@ async function handleChat(req, res) {
     log('error', `${body.agent} chat failed: ${e?.message || e}`);
     emit({ type: 'error', error: e?.message || String(e) });
   } finally {
+    endRun(runId);
     if (session) deleteSession(session.id);
     if (!res.writableEnded) res.end();
   }
+}
+
+/**
+ * POST /cancel { id } — stop a run by name.
+ *
+ * Stop is now an instruction, not something inferred from a socket. Answers 200 whether or
+ * not the run was still live: 'already finished' and 'cancelled' are the same outcome to the
+ * caller, and returning 404 would make a harmless race look like a failure.
+ */
+async function handleCancel(req, res) {
+  let body = {};
+  try { body = JSON.parse(await readBody(req) || '{}'); } catch { /* an empty body cancels nothing */ }
+  const id = String(body.id || '').trim();
+  const cancelled = id ? cancelRun(id, 'stopped') : false;
+  if (cancelled) log('info', `cancel: ${id} stopped by client`);
+  return json(res, 200, { ok: true, cancelled });
 }
 
 // POST /mcp/<session> (per-run, bridge-injected) OR POST /mcp (stable: routes to
@@ -754,6 +784,7 @@ const server = createServer(async (req, res) => {
       if (req.method === 'GET') { res.writeHead(405); return res.end(); } // no server-initiated stream
       if (req.method === 'DELETE') { deleteSession(sid); res.writeHead(204); return res.end(); }
     }
+    if (req.method === 'POST' && url.pathname === '/cancel') return handleCancel(req, res);
     if (req.method === 'POST' && url.pathname === '/tool-result') return handleToolResult(req, res);
     if (req.method === 'POST' && url.pathname === '/mcp-local') return handleMcpLocal(req, res);
     if (req.method === 'POST' && url.pathname === '/mcp-remote') return handleMcpRemote(req, res);
@@ -841,6 +872,18 @@ function startServer() {
     log('error', `bridge server error: ${e?.message || e}`);
     process.exit(1);
   });
+  // Leaving a CLI running after the bridge exits is how orphans are made — and the user has
+  // no way to find or stop them, because the thing that spawned them is gone.
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, () => {
+      const n = cancelAll('shutdown');
+      if (n) log('info', `shutdown: stopped ${n} running agent${n === 1 ? '' : 's'}`);
+      // Give SIGTERM a moment to land before the process goes; killTree escalates on its own.
+      setTimeout(() => process.exit(0), n ? 300 : 0).unref?.();
+      if (!n) process.exit(0);
+    });
+  }
+
   server.listen(PORT, HOST, async () => {
     log('info', `listening on http://${HOST}:${PORT}`);
     // M7: a non-loopback bind disables the anti-DNS-rebinding Host check (hostAllowed
