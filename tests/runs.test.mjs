@@ -67,3 +67,23 @@ test('ending a run removes it, so the registry cannot grow without bound', () =>
   endRun('run_g');
   assert.equal(activeRuns(), n);
 });
+
+// A process-group kill is not enough on its own. codex runs each shell step in its OWN
+// process group, so signalling the group we created deliberately misses it — a `sleep 90`
+// survived Stop with PGID equal to its own pid, then reparented to init where nothing
+// connected it to the run that started it.
+test('the process tree is snapshotted before anything is signalled', async () => {
+  const src = await import('node:fs').then((m) => m.readFileSync(new URL('../src/proc.js', import.meta.url), 'utf8'));
+  // Reading the tree AFTER killing the parent finds nothing: the links are already gone.
+  const onAbort = src.slice(src.indexOf('const onAbort'), src.indexOf('if (signal.aborted)'));
+  assert.ok(/const tree = descendantsOf\(child\.pid\)/.test(onAbort), 'the tree is read up front');
+  assert.ok(onAbort.indexOf('descendantsOf') < onAbort.indexOf("killTree(child, 'SIGTERM'"), 'before the first signal');
+  // And the same snapshot is used for the escalation, which runs when the parent is gone.
+  assert.ok(/setTimeout\(\(\) => killTree\(child, 'SIGKILL', tree\)/.test(onAbort));
+});
+
+test('descendants are signalled before the parent', async () => {
+  const src = await import('node:fs').then((m) => m.readFileSync(new URL('../src/proc.js', import.meta.url), 'utf8'));
+  const fn = src.slice(src.indexOf('function killTree'), src.indexOf('export function killOnAbort'));
+  assert.ok(fn.indexOf('process.kill(pid, sig)') < fn.indexOf('process.kill(-child.pid'), 'children first, while the parent can still be traced through');
+});

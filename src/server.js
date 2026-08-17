@@ -39,7 +39,7 @@ import { startRun, endRun, cancelRun, cancelAll, activeRuns } from './runs.js';
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.24';
+const VERSION = '0.10.25';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -239,6 +239,10 @@ const PRIVILEGED_POST = new Set([
   '/agent-check',
   '/update',
   '/tool-result',
+  // Cancelling someone else's run is a denial of service, small but real — and every other
+  // endpoint that touches a run is already guarded. An unauthenticated hole next to nine
+  // guarded neighbours is a hole regardless of how little it grants.
+  '/cancel',
 ]);
 const PRIVILEGED_GET = new Set(['/debug']);
 
@@ -401,8 +405,11 @@ async function handleChat(req, res) {
  * caller, and returning 404 would make a harmless race look like a failure.
  */
 async function handleCancel(req, res) {
+  // readBody already PARSES. Wrapping it in JSON.parse threw on every call, so the id was
+  // always empty and Stop silently cancelled nothing — the unit tests covered the registry
+  // and not the handler that feeds it, which is exactly where this hid.
   let body = {};
-  try { body = JSON.parse(await readBody(req) || '{}'); } catch { /* an empty body cancels nothing */ }
+  try { body = (await readBody(req)) || {}; } catch { /* an empty body cancels nothing */ }
   const id = String(body.id || '').trim();
   const cancelled = id ? cancelRun(id, 'stopped') : false;
   if (cancelled) log('info', `cancel: ${id} stopped by client`);
