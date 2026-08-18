@@ -3,7 +3,7 @@
 // running on this machine (Claude Code, Codex and Antigravity, each via its CLI) to
 // the ChatPanel Chrome extension. Zero runtime dependencies.
 //
-//   GET  /health  → { ok, version, agents: [...], update: {current,latest,…} }
+//   GET  /health  → { ok, version, agents: [{id,label,available,reason,connectors}], update }
 //   POST /update  → self-update to the latest release (compiled binary installs)
 //   POST /chat    → Server-Sent Events stream of { type, ... }:
 //                     {type:'delta', text}    incremental assistant text
@@ -27,6 +27,7 @@ import * as claude from './engines/claude.js';
 import * as codex from './engines/codex.js';
 import * as antigravity from './engines/antigravity.js';
 import { pi, opencode, kiro, copilot, deepseek } from './engines/cli-agents.js';
+import { connectorsFor } from './connectors.js';
 import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
 import { AGENT_CLIS, enrichPath, enrichAgentEnv, findAgentBin, resolveCommand } from './env.js';
@@ -39,7 +40,7 @@ import { startRun, endRun, cancelRun, cancelAll, activeRuns } from './runs.js';
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.25';
+const VERSION = '0.10.26';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -299,7 +300,13 @@ async function handleHealth(res) {
       .filter(([, e]) => !e.hidden)
       .map(async ([id, { engine, label }]) => {
         const a = await engine.available().catch((e) => ({ ok: false, reason: String(e?.message || e) }));
-        return { id, label, available: a.ok, reason: a.reason };
+        // WHAT THIS AGENT CAN ALREADY REACH, so the client stops guessing. A CLI agent brings
+        // its own connectors — a Slack MCP, a Jira MCP — that the extension cannot see, and
+        // an agent that was never told it may use them answers "go and look it up yourself".
+        // NAMES ONLY: a server's name is what a prompt needs; its URL, argv and env are what
+        // a leak would be made of. Additive, so an older extension ignores it.
+        const connectors = await connectorsFor(id).catch(() => []);
+        return { id, label, available: a.ok, reason: a.reason, connectors };
       }),
   );
   const update = await checkForUpdate(VERSION).catch(() => ({ current: VERSION, updateAvailable: false }));
