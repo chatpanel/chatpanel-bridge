@@ -87,6 +87,11 @@ npm start                    # → http://127.0.0.1:4319
 |--------|------|---------|
 | `GET`  | `/health` | `{ ok, version, agents:[{id,label,available,reason}] }` |
 | `POST` | `/chat`   | SSE stream — body `{ agent, system, options, messages }` |
+| `GET`  | `/v1/models` | OpenAI-compatible list of available local agents |
+| `POST` | `/v1/chat/completions` | OpenAI-compatible Chat Completions (streaming and non-streaming) |
+| `POST` | `/v1/completions` | OpenAI-compatible legacy text Completions (streaming and non-streaming) |
+| `POST` | `/v1/responses` | OpenAI-compatible Responses API (streaming and non-streaming) |
+| `POST` | `/v1/messages` | Anthropic-compatible Messages API (streaming and non-streaming) |
 
 `/chat` streams Server-Sent Events: `{type:'delta',text}` as the answer is
 generated, `{type:'tool',name,summary}` / `{type:'status'}` for activity, and a
@@ -101,6 +106,57 @@ final `{type:'done'}` (or `{type:'error',error}`).
   "model": ""                          // optional model override
 }
 ```
+
+### OpenAI and Anthropic SDK compatibility
+
+The compatibility routes run a local coding agent; they do not call a provider
+API. Use the per-install token from `~/.chatpanel/bridge-token` as the SDK API
+key. The token protects endpoints that can start local processes, so do not put
+it in browser-delivered code or share it.
+
+For OpenAI clients, set the base URL to `http://127.0.0.1:4319/v1` and use an
+installed agent id such as `codex` as the model:
+
+```js
+import OpenAI from 'openai';
+import { readFileSync } from 'node:fs';
+
+const client = new OpenAI({
+  apiKey: readFileSync(`${process.env.HOME}/.chatpanel/bridge-token`, 'utf8').trim(),
+  baseURL: 'http://127.0.0.1:4319/v1',
+});
+
+const result = await client.responses.create({
+  model: 'codex',
+  input: 'Explain this project in three bullets.',
+});
+console.log(result.output_text);
+```
+
+`client.chat.completions.create(...)` and legacy `client.completions.create(...)`
+work through the same base URL. For the Anthropic SDK, use
+`http://127.0.0.1:4319` as its base URL and the same token as its API key;
+requests to `/v1/messages` can also use `model: "codex"`.
+
+The model field selects the local agent. `codex/gpt-5.5`, for example, selects
+the Codex agent and passes `gpt-5.5` as its CLI model override. Advanced bridge
+settings can be supplied through an extra `chatpanel` request object:
+
+```jsonc
+{
+  "model": "codex",
+  "messages": [{ "role": "user", "content": "Fix the failing tests." }],
+  "chatpanel": {
+    "working_dir": "/absolute/path/to/project",
+    "permission_mode": "acceptEdits",
+    "use_local_config": true
+  }
+}
+```
+
+The adapter currently covers text conversations. Provider-hosted function tools,
+stored responses, log probabilities, and exact token accounting are not
+available; unsupported tool requests return HTTP 400, and usage counts are zero.
 
 ## Safety
 

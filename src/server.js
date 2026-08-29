@@ -11,6 +11,9 @@
 //                     {type:'status'|'reasoning', text?}
 //                     {type:'done',  text?}    (text only if not streamed)
 //                     {type:'error', error}
+//   POST /v1/chat/completions, /v1/completions, /v1/responses
+//                 → OpenAI-compatible text adapters for the local agents
+//   POST /v1/messages → Anthropic-compatible text adapter for the local agents
 //
 // Binds to 127.0.0.1 only. A request guard (see `guard()`) enforces a loopback
 // Host (anti DNS-rebinding) and an allowlisted Origin; the command-spawning
@@ -36,11 +39,28 @@ import { checkForUpdate, selfUpdate } from './update.js';
 import { callLocalMcp } from './mcp-local.js';
 import { assertPublicHttpUrl, assertPublicWebUrl } from './ssrf.js';
 import { startRun, endRun, cancelRun, cancelAll, activeRuns } from './runs.js';
+import {
+  CompatError,
+  anthropicError,
+  anthropicStream,
+  chatCompletionStream,
+  completionStream,
+  createAnthropicMessage,
+  createChatCompletion,
+  createCompletion,
+  createResponse,
+  openAIError,
+  parseAnthropicMessage,
+  parseChatCompletion,
+  parseCompletion,
+  parseResponse,
+  responseStream,
+} from './api-compat.js';
 
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.26';
+const VERSION = '0.10.27';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -163,7 +183,7 @@ function cors(req, res) {
   const allow = originAllowed(origin);
   res.setHeader('Access-Control-Allow-Origin', allow ? origin || '*' : 'null');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-ChatPanel-Token');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Api-Key, Anthropic-Version, X-ChatPanel-Token');
   res.setHeader('Vary', 'Origin');
 }
 
@@ -219,7 +239,9 @@ function ensureToken() {
 function tokenOk(req) {
   if (!AUTH_TOKEN) return false;
   const h = String(req.headers['authorization'] || '');
-  const provided = (h.startsWith('Bearer ') ? h.slice(7) : String(req.headers['x-chatpanel-token'] || '')).trim();
+  const provided = (h.startsWith('Bearer ')
+    ? h.slice(7)
+    : String(req.headers['x-api-key'] || req.headers['x-chatpanel-token'] || '')).trim();
   if (!provided) return false;
   const a = Buffer.from(provided);
   const b = Buffer.from(AUTH_TOKEN);
@@ -232,6 +254,10 @@ function tokenOk(req) {
 // local coding-agent CLIs connect to them with no Origin header by design.
 const PRIVILEGED_POST = new Set([
   '/chat',
+  '/v1/chat/completions',
+  '/v1/completions',
+  '/v1/responses',
+  '/v1/messages',
   '/mcp-local',
   '/mcp-remote',
   '/fetch-title',
@@ -311,6 +337,30 @@ async function handleHealth(res) {
   );
   const update = await checkForUpdate(VERSION).catch(() => ({ current: VERSION, updateAvailable: false }));
   json(res, 200, { ok: true, version: VERSION, agents, update });
+}
+
+async function compatibleModels() {
+  const rows = await Promise.all(
+    Object.entries(ENGINES)
+      .filter(([, entry]) => !entry.hidden)
+      .map(async ([id, entry]) => ({
+        id,
+        object: 'model',
+        created: 0,
+        owned_by: 'chatpanel',
+        available: !!(await entry.engine.available().catch(() => ({ ok: false }))).ok,
+      })),
+  );
+  return rows.filter((row) => row.available).map(({ available, ...row }) => row);
+}
+
+async function handleCompatibleModels(res, modelId = '') {
+  const models = await compatibleModels();
+  if (modelId) {
+    const model = models.find((row) => row.id === modelId);
+    return model ? json(res, 200, model) : json(res, 404, openAIError(new CompatError(`Model "${modelId}" not found`, 404, 'model')));
+  }
+  return json(res, 200, { object: 'list', data: models });
 }
 
 // POST /update — self-update (compiled-binary installs). Swaps the binary, replies,
@@ -402,6 +452,162 @@ async function handleChat(req, res) {
     if (session) deleteSession(session.id);
     if (!res.writableEnded) res.end();
   }
+}
+
+async function runCompatibleAgent(config, onDelta, res) {
+  const target = ENGINES[config.agent];
+  if (!target || target.hidden) throw new CompatError(`Unknown ChatPanel agent "${config.agent}"`, 400, 'model');
+  const availability = await target.engine.available().catch((e) => ({ ok: false, reason: e?.message || String(e) }));
+  if (!availability.ok) throw new CompatError(availability.reason || `${config.agent} is unavailable`, 503, 'model');
+
+  const runId = `run_${Math.random().toString(36).slice(2, 10)}`;
+  const run = startRun(runId);
+  const onGone = () => run.cancel('disconnected');
+  res.on('close', onGone);
+  let output = '';
+  try {
+    await target.engine.chat(
+      { messages: config.messages, system: config.system, options: config.options, images: [] },
+      (event) => {
+        if (event?.type === 'delta' && event.text) {
+          output += event.text;
+          onDelta(event.text);
+        } else if (event?.type === 'done' && event.text && !output) {
+          output = event.text;
+          onDelta(event.text);
+        }
+      },
+      { signal: run.signal },
+    );
+    return output;
+  } finally {
+    res.off('close', onGone);
+    endRun(runId);
+  }
+}
+
+function beginSse(res) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+}
+
+function writeData(res, value) {
+  if (!res.writableEnded) res.write(`data: ${typeof value === 'string' ? value : JSON.stringify(value)}\n\n`);
+}
+
+function writeNamedEvent(res, name, value) {
+  if (!res.writableEnded) res.write(`event: ${name}\ndata: ${JSON.stringify(value)}\n\n`);
+}
+
+async function compatibleBody(req, res, parser, errorShape) {
+  try {
+    return parser(await readBody(req));
+  } catch (error) {
+    json(res, error?.status || 400, errorShape(error?.message?.startsWith('Unexpected') ? new CompatError(`Bad JSON: ${error.message}`) : error));
+    return null;
+  }
+}
+
+async function handleOpenAIChatCompletions(req, res) {
+  const config = await compatibleBody(req, res, parseChatCompletion, openAIError);
+  if (!config) return;
+  if (!config.stream) {
+    try {
+      const text = await runCompatibleAgent(config, () => {}, res);
+      return json(res, 200, createChatCompletion(config.requestedModel, text));
+    } catch (error) {
+      if (!res.writableEnded) return json(res, error?.status || 500, openAIError(error));
+      return;
+    }
+  }
+
+  beginSse(res);
+  const stream = chatCompletionStream(config.requestedModel, (event) => writeData(res, event));
+  try {
+    await runCompatibleAgent(config, (text) => stream.delta(text), res);
+    stream.done();
+  } catch (error) {
+    writeData(res, openAIError(error));
+  }
+  writeData(res, '[DONE]');
+  res.end();
+}
+
+async function handleOpenAICompletions(req, res) {
+  const config = await compatibleBody(req, res, parseCompletion, openAIError);
+  if (!config) return;
+  if (!config.stream) {
+    try {
+      const text = await runCompatibleAgent(config, () => {}, res);
+      return json(res, 200, createCompletion(config.requestedModel, text));
+    } catch (error) {
+      if (!res.writableEnded) return json(res, error?.status || 500, openAIError(error));
+      return;
+    }
+  }
+
+  beginSse(res);
+  const stream = completionStream(config.requestedModel, (event) => writeData(res, event));
+  try {
+    await runCompatibleAgent(config, (text) => stream.delta(text), res);
+    stream.done();
+  } catch (error) {
+    writeData(res, openAIError(error));
+  }
+  writeData(res, '[DONE]');
+  res.end();
+}
+
+async function handleOpenAIResponses(req, res) {
+  const config = await compatibleBody(req, res, parseResponse, openAIError);
+  if (!config) return;
+  if (!config.stream) {
+    try {
+      const text = await runCompatibleAgent(config, () => {}, res);
+      return json(res, 200, createResponse(config.requestedModel, text));
+    } catch (error) {
+      if (!res.writableEnded) return json(res, error?.status || 500, openAIError(error));
+      return;
+    }
+  }
+
+  beginSse(res);
+  const stream = responseStream(config.requestedModel, (event) => writeNamedEvent(res, event.type, event));
+  try {
+    await runCompatibleAgent(config, (text) => stream.delta(text), res);
+    stream.done();
+  } catch (error) {
+    const event = { type: 'error', sequence_number: 0, ...openAIError(error) };
+    writeNamedEvent(res, 'error', event);
+  }
+  res.end();
+}
+
+async function handleAnthropicMessages(req, res) {
+  const config = await compatibleBody(req, res, parseAnthropicMessage, anthropicError);
+  if (!config) return;
+  if (!config.stream) {
+    try {
+      const text = await runCompatibleAgent(config, () => {}, res);
+      return json(res, 200, createAnthropicMessage(config.requestedModel, text));
+    } catch (error) {
+      if (!res.writableEnded) return json(res, error?.status || 500, anthropicError(error));
+      return;
+    }
+  }
+
+  beginSse(res);
+  const stream = anthropicStream(config.requestedModel, (name, event) => writeNamedEvent(res, name, event));
+  try {
+    await runCompatibleAgent(config, (text) => stream.delta(text), res);
+    stream.done();
+  } catch (error) {
+    writeNamedEvent(res, 'error', anthropicError(error));
+  }
+  res.end();
 }
 
 /**
@@ -772,6 +978,10 @@ const server = createServer(async (req, res) => {
   if (blocked) return json(res, 403, { error: blocked });
   try {
     if (req.method === 'GET' && url.pathname === '/health') return handleHealth(res);
+    if (req.method === 'GET' && url.pathname === '/v1/models') return handleCompatibleModels(res);
+    if (req.method === 'GET' && url.pathname.startsWith('/v1/models/')) {
+      return handleCompatibleModels(res, decodeURIComponent(url.pathname.slice('/v1/models/'.length)));
+    }
     if (req.method === 'GET' && url.pathname === '/debug') {
       // L6: by default expose only version + agent AVAILABILITY (a boolean) — enough
       // to diagnose "is codex installed?". The full home dir, $PATH, and resolved
@@ -786,6 +996,10 @@ const server = createServer(async (req, res) => {
       });
     }
     if (req.method === 'POST' && url.pathname === '/chat') return handleChat(req, res);
+    if (req.method === 'POST' && url.pathname === '/v1/chat/completions') return handleOpenAIChatCompletions(req, res);
+    if (req.method === 'POST' && url.pathname === '/v1/completions') return handleOpenAICompletions(req, res);
+    if (req.method === 'POST' && url.pathname === '/v1/responses') return handleOpenAIResponses(req, res);
+    if (req.method === 'POST' && url.pathname === '/v1/messages') return handleAnthropicMessages(req, res);
     // Stable endpoint: routes to the active chat. For CLIs configured once with a
     // fixed URL (e.g. `opencode mcp add chatpanel --url http://127.0.0.1:4319/mcp`).
     if (url.pathname === '/mcp') {
