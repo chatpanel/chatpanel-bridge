@@ -42,7 +42,12 @@ import { isSafeSkillPath, normalizeSkill, SKILL_FILE_KINDS } from './events/skil
 const MAX_SKILL_MD = 512 * 1024;   // a procedure document, not a corpus
 const MAX_ASSET = 4 * 1024 * 1024; // a reference doc or a template; images live elsewhere
 const MAX_SKILLS = 500;            // a scan is bounded work, not "whatever is on disk"
-const MAX_DEPTH = 2;               // <root>/<name>/ and <root>/<category>/<name>/
+const MAX_DEPTH = 3;               // <root>/<name>/, <root>/<category>/<name>/, and one
+                                   // namespace above that (Codex: .system/<name>/)
+
+// Never a skill and never worth walking: version control and package metadata. Everything
+// else hidden IS walked — see the namespace note in scanSkills.
+const SKIP_DIRS = new Set(['.git', '.svn', '.hg', '.cache', '.DS_Store', 'node_modules']);
 
 /**
  * The agent CLIs that keep skills in a well-known directory, and what to call each one.
@@ -238,13 +243,19 @@ export async function scanSkills({ roots = skillRoots(), platform = process.plat
       if (index.size >= MAX_SKILLS || depth > MAX_DEPTH) return;
       for (const entry of await listDir(dir)) {
         if (index.size >= MAX_SKILLS) return;
-        if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+        if (!entry.isDirectory() || SKIP_DIRS.has(entry.name)) continue;
         const childRel = rel ? `${rel}/${entry.name}` : entry.name;
         const child = join(dir, entry.name);
-        const loaded = await loadSkill(child, childRel, source).catch((e) => {
-          problems.push({ path: childRel, reason: String(e?.message || e) });
-          return null;
-        });
+        // A hidden directory is a NAMESPACE, not a skill. Codex ships its built-ins under
+        // `~/.codex/skills/.system/<name>/SKILL.md`, so skipping every dot-directory —
+        // which was aimed at `.git` — hid six real skills. Walk through it, but never let
+        // it become a skill id of its own.
+        const loaded = entry.name.startsWith('.')
+          ? null
+          : await loadSkill(child, childRel, source).catch((e) => {
+            problems.push({ path: childRel, reason: String(e?.message || e) });
+            return null;
+          });
         if (loaded) {
           // First root wins: ChatPanel's own directory is authoritative over a shared one.
           if (!index.has(loaded.skill.id) && platformOk(loaded.skill, platform)) {

@@ -291,20 +291,46 @@ test('an oversized SKILL.md is skipped rather than read into memory', async () =
   } finally { fx.cleanup(); }
 });
 
-test('nesting stops at two levels', async () => {
+test('nesting is bounded — a namespace above a category, and no further', async () => {
+  // Three levels covers every layout seen in the wild: <name>/, <category>/<name>/, and
+  // Codex's .system/<name>/. A fourth would be an unbounded walk of a user's home.
   const fx = fixture();
   try {
-    fx.write('a/b/c/SKILL.md', SKILL('deep'));
+    fx.write('a/b/c/SKILL.md', SKILL('three-deep'));
+    fx.write('w/x/y/z/SKILL.md', SKILL('four-deep'));
     const { index } = await scanSkills({ roots: [{ dir: fx.root, source: 'local' }] });
-    assert.equal(index.size, 0, 'an unbounded walk of a user directory is not a scan');
+    assert.deepEqual([...index.keys()], ['three-deep'], 'four levels is not a scan, it is a crawl');
   } finally { fx.cleanup(); }
 });
 
-test('a dot-directory is not scanned', async () => {
+test('version control and package metadata are never scanned', async () => {
   const fx = fixture();
   try {
     fx.write('.git/SKILL.md', SKILL('git'));
+    fx.write('node_modules/pkg/SKILL.md', SKILL('pkg'));
     const { index } = await scanSkills({ roots: [{ dir: fx.root, source: 'local' }] });
     assert.equal(index.size, 0);
+  } finally { fx.cleanup(); }
+});
+
+test('a hidden directory is a namespace to walk through, not a skill to skip', async () => {
+  // Codex ships its built-ins under ~/.codex/skills/.system/<name>/SKILL.md. Skipping
+  // every dot-directory — a rule aimed at .git — hid six real skills.
+  const fx = fixture();
+  try {
+    fx.write('.system/imagegen/SKILL.md', SKILL('imagegen'));
+    fx.write('.system/skill-creator/SKILL.md', SKILL('skill-creator'));
+    const { index } = await scanSkills({ roots: [{ dir: fx.root, source: 'codex' }] });
+    assert.deepEqual([...index.keys()].sort(), ['imagegen', 'skill-creator']);
+    assert.equal(readRecord(index, 'imagegen').origin.id, '.system/imagegen', 'the namespace stays in the id');
+  } finally { fx.cleanup(); }
+});
+
+test('the namespace itself never becomes a skill', async () => {
+  const fx = fixture();
+  try {
+    fx.write('.system/SKILL.md', SKILL('system'));
+    const { index } = await scanSkills({ roots: [{ dir: fx.root, source: 'codex' }] });
+    assert.equal(index.size, 0, 'a hidden directory is walked, never indexed');
   } finally { fx.cleanup(); }
 });
