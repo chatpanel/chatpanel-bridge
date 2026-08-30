@@ -36,7 +36,9 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "test": "node --test tests/*.test.mjs",
-    "build:bin": "bash scripts/build-binaries.sh"
+    "build:bin": "bash scripts/build-binaries.sh",
+    "sync:events": "node scripts/sync-events.mjs",
+    "test:events-sync": "node scripts/sync-events.mjs --check"
   },
   "dependencies": {},
   "optionalDependencies": {

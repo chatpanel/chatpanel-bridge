@@ -14,6 +14,9 @@
 //   POST /v1/chat/completions, /v1/completions, /v1/responses
 //                 → OpenAI-compatible text adapters for the local agents
 //   POST /v1/messages → Anthropic-compatible text adapter for the local agents
+//   GET  /skills              → skill packages on disk (name + description + files)
+//   GET  /skills/<name>       → one skill, SKILL.md body included
+//   GET  /skills/<name>/file/<path> → one reference/template/asset from that package
 //
 // Binds to 127.0.0.1 only. A request guard (see `guard()`) enforces a loopback
 // Host (anti DNS-rebinding) and an allowlisted Origin; the command-spawning
@@ -33,6 +36,7 @@ import { pi, opencode, kiro, copilot, deepseek } from './engines/cli-agents.js';
 import { connectorsFor } from './connectors.js';
 import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
+import { skillIndex, listRecords, readRecord, readPackageFile, skillsHealth } from './skills.js';
 import { AGENT_CLIS, enrichPath, enrichAgentEnv, findAgentBin, resolveCommand } from './env.js';
 import { stripHidden } from './sanitize.js';
 import { checkForUpdate, selfUpdate } from './update.js';
@@ -271,7 +275,10 @@ const PRIVILEGED_POST = new Set([
   // guarded neighbours is a hole regardless of how little it grants.
   '/cancel',
 ]);
-const PRIVILEGED_GET = new Set(['/debug']);
+const PRIVILEGED_GET = new Set(['/debug', '/skills']);
+// /skills/<name>… reads files from the user's disk, so it needs the same caller proof as
+// the exact-match entries above; a Set cannot express the prefix.
+const isPrivilegedGetPath = (p) => PRIVILEGED_GET.has(p) || p.startsWith('/skills/');
 
 // SSRF guard for /mcp-remote lives in ./ssrf.js (assertPublicHttpUrl). Loopback
 // is allowed (the user's own localhost MCP server — the common "via bridge"
@@ -287,7 +294,7 @@ function guard(req, pathname) {
   if (origin && !originAllowed(origin)) return 'forbidden origin';
   const privileged =
     (req.method === 'POST' && PRIVILEGED_POST.has(pathname)) ||
-    (req.method === 'GET' && PRIVILEGED_GET.has(pathname));
+    (req.method === 'GET' && isPrivilegedGetPath(pathname));
   if (privileged && !(isExtensionOrigin(origin) || tokenOk(req))) {
     return 'forbidden: this endpoint requires the ChatPanel extension or a valid bridge token';
   }
@@ -336,7 +343,41 @@ async function handleHealth(res) {
       }),
   );
   const update = await checkForUpdate(VERSION).catch(() => ({ current: VERSION, updateAvailable: false }));
-  json(res, 200, { ok: true, version: VERSION, agents, update });
+  // ADDITIVE, and the client's only way to know this bridge can host skill packages —
+  // an older bridge simply omits it, which is what stops a newer extension assuming the
+  // endpoints exist. Never let a scan failure cost the caller its health check.
+  const skills = await skillsHealth().catch(() => null);
+  json(res, 200, { ok: true, version: VERSION, agents, update, ...(skills ? { skills } : {}) });
+}
+
+// --------------------------------------------------------------------------
+// Skill packages (F6 S2). Read-only: the store serves what is already on disk.
+// Installing FROM a hub waits for the scanner — a write endpoint that lands before
+// the gate is a window in which unscanned packages can be written, and windows like
+// that do not close on schedule.
+//
+// The three routes are the progressive-disclosure ladder, so a client pays for a
+// skill's body only when it picks one, and for a reference file only when it needs it.
+// --------------------------------------------------------------------------
+async function handleSkillsList(res) {
+  const { index, problems } = await skillIndex();
+  json(res, 200, { ok: true, skills: listRecords(index), problems });
+}
+
+async function handleSkillRead(res, name) {
+  const { index } = await skillIndex();
+  const skill = readRecord(index, name);
+  if (!skill) return json(res, 404, { ok: false, error: 'unknown skill' });
+  json(res, 200, { ok: true, skill });
+}
+
+async function handleSkillFile(res, name, relPath) {
+  const { index } = await skillIndex();
+  const out = await readPackageFile(index, name, relPath);
+  // One shape for every refusal: a caller learns that it may not have the file, not
+  // whether the path exists, which is the difference between an error and an oracle.
+  if (out.error) return json(res, out.error === 'unknown skill' ? 404 : 400, { ok: false, error: out.error });
+  json(res, 200, { ok: true, ...out });
 }
 
 async function compatibleModels() {
@@ -978,6 +1019,17 @@ const server = createServer(async (req, res) => {
   if (blocked) return json(res, 403, { error: blocked });
   try {
     if (req.method === 'GET' && url.pathname === '/health') return handleHealth(res);
+    if (req.method === 'GET' && url.pathname === '/skills') return handleSkillsList(res);
+    if (req.method === 'GET' && url.pathname.startsWith('/skills/')) {
+      const rest = url.pathname.slice('/skills/'.length);
+      const cut = rest.indexOf('/file/');
+      if (cut === -1) return handleSkillRead(res, decodeURIComponent(rest));
+      return handleSkillFile(
+        res,
+        decodeURIComponent(rest.slice(0, cut)),
+        decodeURIComponent(rest.slice(cut + '/file/'.length)),
+      );
+    }
     if (req.method === 'GET' && url.pathname === '/v1/models') return handleCompatibleModels(res);
     if (req.method === 'GET' && url.pathname.startsWith('/v1/models/')) {
       return handleCompatibleModels(res, decodeURIComponent(url.pathname.slice('/v1/models/'.length)));

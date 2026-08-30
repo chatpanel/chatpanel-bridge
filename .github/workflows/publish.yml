@@ -38,6 +38,11 @@ jobs:
             exit 1
           fi
 
+      # The suite has never run in CI, so a green publish said nothing about whether the
+      # thing being published works. No install step is needed — zero runtime dependencies.
+      - name: Test
+        run: npm test
+
       - name: Ensure npm supports trusted publishing (>= 11.5.1)
         run: npm install -g npm@latest
 
