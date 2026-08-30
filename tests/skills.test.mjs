@@ -241,15 +241,23 @@ test('traversal in a file path is refused', async () => {
   } finally { fx.cleanup(); }
 });
 
-test('a file outside the package directories is refused even when the path is clean', async () => {
-  // SKILL.md itself is served by the read level; the file level is for the declared
-  // package directories only, so an arbitrary sibling is not fetchable through it.
+test('any file inside the skill folder is readable — a rich skill keeps docs in its own tree', async () => {
+  // The boundary is the skill's OWN directory, not a fixed set of top-level dir names. A
+  // skill like microsoft-foundry keeps references at foundry-agent/deploy/deploy.md; the
+  // old rule refused every nested path its own SKILL.md pointed at.
   const fx = fixture();
   try {
     fx.write('a/SKILL.md', SKILL('a'));
-    fx.write('a/notes.txt', 'private');
+    fx.write('a/notes.txt', 'root doc');
+    fx.write('a/deep/section/guide.md', 'nested doc');
     const { index } = await scanSkills({ roots: [{ dir: fx.root, source: 'local' }] });
-    assert.equal((await readPackageFile(index, 'a', 'notes.txt')).error, 'unsafe path');
+    assert.equal((await readPackageFile(index, 'a', 'notes.txt')).text, 'root doc');
+    assert.equal((await readPackageFile(index, 'a', 'deep/section/guide.md')).text, 'nested doc');
+    // scripts/ stays off-limits to a text read — that is the tier-3 execution boundary.
+    fx.write('a/scripts/run.sh', 'echo hi');
+    assert.match((await readPackageFile(index, 'a', 'scripts/run.sh')).error, /scripts are not readable/);
+    // …and escape is still refused.
+    assert.ok((await readPackageFile(index, 'a', '../secret.txt')).error);
   } finally { fx.cleanup(); }
 });
 

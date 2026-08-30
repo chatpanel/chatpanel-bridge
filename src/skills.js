@@ -323,10 +323,16 @@ export async function readPackageFile(index, name, relPath) {
   const hit = index.get(String(name || ''));
   if (!hit) return { error: 'unknown skill' };
   if (!isSafeSkillPath(relPath)) return { error: 'unsafe path' };
-  // '/' by wire contract — the HTTP path is URL-shaped, and isSafeSkillPath already
-  // refuses backslashes, so a Windows-style separator never reaches here.
-  const kind = String(relPath).split('/')[0];
-  if (!SKILL_FILE_KINDS.includes(kind)) return { error: 'unsafe path' };
+  // A skill's docs live wherever its author put them — a flat references/ for simple ones,
+  // a deep tree (foundry-agent/deploy/deploy.md, rbac/, quota/…) for rich ones. The SKILL.md
+  // IS the map, so the readable set is "any file inside this skill's own folder", enforced
+  // below by realpath containment — not a fixed list of top-level directory names, which
+  // silently refused every nested reference the skill's own instructions pointed at.
+  //
+  // The one exception is scripts/: tier-3 executable code is run behind a confirmation, never
+  // handed to a model as text. '/' by wire contract — isSafeSkillPath already refuses
+  // backslashes, so a Windows separator never reaches here.
+  if (String(relPath).split('/')[0] === 'scripts') return { error: 'scripts are not readable as text' };
 
   const target = resolve(hit.dir, relPath);
   let real;
