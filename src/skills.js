@@ -38,6 +38,7 @@ import { createHash } from 'node:crypto';
 import os from 'node:os';
 import { delimiter, join, resolve, sep } from 'node:path';
 import { isSafeSkillPath, normalizeSkill, SKILL_FILE_KINDS } from './events/skill-manifest.js';
+import { scanSkill, admits } from './events/skill-scan.js';
 
 const MAX_SKILL_MD = 512 * 1024;   // a procedure document, not a corpus
 const MAX_ASSET = 4 * 1024 * 1024; // a reference doc or a template; images live elsewhere
@@ -228,7 +229,12 @@ async function loadSkill(dir, relPath, source) {
   const dirName = relPath.split('/').pop();
   const files = await packageFiles(dir);
   const skill = skillRecord({ meta, body, dirName, relPath, source, files, hash });
-  return { skill, dir };
+  // Scanned before it can enter the index — even a local skill, because a folder synced
+  // from elsewhere or pulled by another tool is not something the user wrote. The verdict
+  // rides on the origin so a client can show it; the caller quarantines a dangerous one.
+  const scan = scanSkill({ name: skill.name, prompt: skill.prompt, files: files || [] });
+  skill.origin = { ...skill.origin, scanned: { verdict: scan.verdict, scanner: scan.scanner, findings: scan.findings.length } };
+  return { skill, dir, scan };
 }
 
 /**
@@ -238,6 +244,7 @@ async function loadSkill(dir, relPath, source) {
 export async function scanSkills({ roots = skillRoots(), platform = process.platform } = {}) {
   const index = new Map();
   const problems = [];
+  const quarantined = [];
   for (const { dir: root, source } of roots) {
     const walk = async (dir, rel, depth) => {
       if (index.size >= MAX_SKILLS || depth > MAX_DEPTH) return;
@@ -257,8 +264,13 @@ export async function scanSkills({ roots = skillRoots(), platform = process.plat
             return null;
           });
         if (loaded) {
-          // First root wins: ChatPanel's own directory is authoritative over a shared one.
-          if (!index.has(loaded.skill.id) && platformOk(loaded.skill, platform)) {
+          // A dangerous skill is kept on disk (the user may want to inspect or remove it)
+          // but never enters the index — so it cannot be listed, read, offered as a slash
+          // command, or handed to a model. Recorded so a client can say WHY it is missing.
+          if (!admits(loaded.scan?.verdict)) {
+            quarantined.push({ id: loaded.skill.id, path: childRel, verdict: loaded.scan.verdict, findings: loaded.scan.findings });
+          } else if (!index.has(loaded.skill.id) && platformOk(loaded.skill, platform)) {
+            // First root wins: ChatPanel's own directory is authoritative over a shared one.
             index.set(loaded.skill.id, { ...loaded, root, source });
           }
         } else {
@@ -268,7 +280,7 @@ export async function scanSkills({ roots = skillRoots(), platform = process.plat
     };
     await walk(root, '', 1);
   }
-  return { index, problems };
+  return { index, problems, quarantined };
 }
 
 /** Level 0 — what exists, cheaply. No bodies. */
@@ -341,7 +353,7 @@ export function clearSkillCache() { cached = null; }
 
 /** The `/health` summary — counts and roots, never contents. */
 export async function skillsHealth() {
-  const { index, problems } = await skillIndex();
+  const { index, problems, quarantined } = await skillIndex();
   const used = new Set([...index.values()].map((v) => v.root));
   return {
     count: index.size,
@@ -350,5 +362,14 @@ export async function skillsHealth() {
     roots: skillRoots().filter((r) => used.has(r.dir)).map((r) => r.dir),
     sources: [...new Set([...index.values()].map((v) => v.source))].sort(),
     ...(problems.length ? { problems: problems.length } : {}),
+    // A count, not the contents. That there is a blocked skill is worth surfacing; the
+    // findings are read on demand, not broadcast on every health poll.
+    ...(quarantined?.length ? { quarantined: quarantined.length } : {}),
   };
+}
+
+/** The blocked skills, with their findings — for a client that wants to show them. */
+export async function quarantinedSkills() {
+  const { quarantined } = await skillIndex();
+  return quarantined || [];
 }

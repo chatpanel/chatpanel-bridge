@@ -21,7 +21,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // Deliberately short. `skill-manifest.js` imports only `scopes.js`, which is why that
 // vocabulary was split out of `capability.js` — vendoring the capability machinery and
 // the event schema to reach a five-element array would defeat the point.
-const FILES = ['scopes.js', 'skill-manifest.js'];
+const FILES = ['scopes.js', 'skill-manifest.js', 'skill-scan.js'];
 
 function pkgDir() {
   return [

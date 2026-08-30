@@ -37,7 +37,7 @@ import { pi, opencode, kiro, copilot, deepseek } from './engines/cli-agents.js';
 import { connectorsFor } from './connectors.js';
 import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
-import { skillIndex, listRecords, readRecord, readPackageFile, skillsHealth } from './skills.js';
+import { skillIndex, listRecords, readRecord, readPackageFile, skillsHealth, quarantinedSkills } from './skills.js';
 import { DEFAULT_WORKSPACE, isDefaultWorkdir, resolveWorkdir, writeScopeNote } from './workdir.js';
 import { AGENT_CLIS, enrichPath, enrichAgentEnv, findAgentBin, resolveCommand } from './env.js';
 import { stripHidden } from './sanitize.js';
@@ -389,6 +389,10 @@ async function handleHealth(res) {
 async function handleSkillsList(res) {
   const { index, problems } = await skillIndex();
   json(res, 200, { ok: true, skills: listRecords(index), problems });
+}
+
+async function handleSkillsQuarantined(res) {
+  json(res, 200, { ok: true, quarantined: await quarantinedSkills() });
 }
 
 async function handleSkillRead(res, name) {
@@ -1062,6 +1066,7 @@ const server = createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && url.pathname === '/health') return handleHealth(res);
     if (req.method === 'GET' && url.pathname === '/skills') return handleSkillsList(res);
+    if (req.method === 'GET' && url.pathname === '/skills-quarantined') return handleSkillsQuarantined(res);
     if (req.method === 'GET' && url.pathname.startsWith('/skills/')) {
       const rest = url.pathname.slice('/skills/'.length);
       const cut = rest.indexOf('/file/');
