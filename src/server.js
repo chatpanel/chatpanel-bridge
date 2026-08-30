@@ -38,6 +38,7 @@ import { connectorsFor } from './connectors.js';
 import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
 import { skillIndex, listRecords, readRecord, readPackageFile, skillsHealth, quarantinedSkills } from './skills.js';
+import { capabilityToolSpecs, runCapabilityTool } from './mcp-capabilities.js';
 import { DEFAULT_WORKSPACE, isDefaultWorkdir, resolveWorkdir, writeScopeNote } from './workdir.js';
 import { AGENT_CLIS, enrichPath, enrichAgentEnv, findAgentBin, resolveCommand } from './env.js';
 import { stripHidden } from './sanitize.js';
@@ -744,22 +745,27 @@ async function handleMcp(req, res, sessionId) {
       serverInfo: { name: 'chatpanel-browser', version: VERSION },
     });
   }
-  // No active chat → advertise zero tools rather than erroring, so a CLI with a
-  // standing /mcp config (run outside ChatPanel) starts cleanly instead of failing.
-  if (!session) {
-    if (msg.method === 'tools/list') return reply({ tools: [] });
-    return fail(-32001, 'No active ChatPanel session — open a chat with “Act on page” on.');
-  }
+  // ChatPanel's own bridge-native capabilities (skills today; redaction and more later) are
+  // ALWAYS advertised — a CLI that added this server once gets them whether or not a browser
+  // chat is open. The active session's page tools are added ON TOP when a chat is driving.
+  const capTools = capabilityToolSpecs();
+
   if (msg.method === 'tools/list') {
-    return reply({
-      tools: session.specs.map((s) => ({
+    const pageTools = session
+      ? session.specs.map((s) => ({
         name: s.name,
         description: s.description,
         inputSchema: s.parameters || { type: 'object', properties: {} },
-      })),
-    });
+      }))
+      : [];
+    return reply({ tools: [...capTools, ...pageTools] });
   }
   if (msg.method === 'tools/call') {
+    // A capability tool runs in the bridge and needs no browser; a page tool relays to the
+    // active chat. Capability tools win a name clash — they are ours and namespaced.
+    const cap = await runCapabilityTool(msg.params?.name, msg.params?.arguments || {});
+    if (cap) return reply(cap);
+    if (!session) return fail(-32001, 'That tool needs an active ChatPanel chat with “Act on page” on. ChatPanel\'s own tools (chatpanel_*) work without one.');
     try {
       return reply(await relayToolCall(session, msg.params?.name, msg.params?.arguments || {}));
     } catch (e) {
