@@ -36,7 +36,7 @@
 import { readFile as fsReadFile, readdir, stat, realpath } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
-import { delimiter, join, resolve, sep } from 'node:path';
+import { delimiter, isAbsolute, join, resolve, sep } from 'node:path';
 import { isSafeSkillPath, normalizeSkill, SKILL_FILE_KINDS } from './events/skill-manifest.js';
 import { scanSkill, admits } from './events/skill-scan.js';
 
@@ -86,15 +86,29 @@ export const AGENT_SKILL_DIRS = Object.freeze([
  * Only the first is written. The rest belong to whatever else the user runs, and a tool
  * that edits another tool's configuration directory is a tool people uninstall.
  */
-export function skillRoots(env = process.env, home = os.homedir()) {
+// User-configured folders come from two places: CHATPANEL_SKILL_DIRS (env, for an operator)
+// and the extension's own setting, passed per request as `extraDirs`. Both are the user's
+// OWN paths on their OWN machine reached over an authed loopback call — so they are allowed,
+// but only if they are ABSOLUTE. A relative or empty entry is dropped rather than resolved
+// against the bridge's cwd, which would scan somewhere the user never named.
+function cleanDirs(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((d) => String(d || '').trim())
+    .filter(Boolean)
+    .filter((d) => isAbsolute(d))
+    .slice(0, 16); // a bound, not a limit anyone will hit
+}
+
+export function skillRoots(env = process.env, home = os.homedir(), extraDirs = []) {
   // Split on the PLATFORM's list separator, not a fixed set. Splitting on ':' everywhere
   // cut "C:\\Users\\me\\skills" into "C" and "\\Users\\me\\skills" on Windows, which is the
   // one platform where a drive letter makes that character part of an ordinary path.
-  const extra = String(env.CHATPANEL_SKILL_DIRS || '')
+  const fromEnv = String(env.CHATPANEL_SKILL_DIRS || '')
     .split(/\r?\n/)
     .flatMap((line) => line.split(delimiter))
     .map((s) => s.trim())
     .filter(Boolean);
+  const extra = [...new Set([...fromEnv, ...cleanDirs(extraDirs)])];
   return [
     ...AGENT_SKILL_DIRS.map((d) => ({
       dir: join(home, ...d.segments),
@@ -102,7 +116,7 @@ export function skillRoots(env = process.env, home = os.homedir()) {
       label: d.label,
       writable: !!d.writable,
     })),
-    ...extra.map((dir) => ({ dir: resolve(dir), source: 'external', label: 'Custom', writable: false })),
+    ...extra.map((dir) => ({ dir: resolve(dir), source: 'external', label: 'Custom folder', writable: false })),
   ];
 }
 
@@ -241,7 +255,8 @@ async function loadSkill(dir, relPath, source) {
  * Scan every root. Returns an INDEX keyed by id — and that index is the only thing a
  * later read may resolve a requested name against.
  */
-export async function scanSkills({ roots = skillRoots(), platform = process.platform } = {}) {
+export async function scanSkills({ roots, extraDirs = [], platform = process.platform } = {}) {
+  roots = roots || skillRoots(process.env, os.homedir(), extraDirs);
   const index = new Map();
   const problems = [];
   const quarantined = [];
@@ -341,25 +356,28 @@ export async function readPackageFile(index, name, relPath) {
 const CACHE_MS = 5000;
 let cached = null;
 
-export async function skillIndex({ force = false, now = Date.now } = {}) {
+export async function skillIndex({ force = false, now = Date.now, extraDirs = [] } = {}) {
   const t = now();
-  if (!force && cached && t - cached.at < CACHE_MS) return cached.value;
-  const value = await scanSkills();
-  cached = { at: t, value };
+  // The cache key includes the custom folders — a scan with extra dirs must not serve, or be
+  // served by, one without them.
+  const key = cleanDirs(extraDirs).map((d) => resolve(d)).sort().join('|');
+  if (!force && cached && cached.key === key && t - cached.at < CACHE_MS) return cached.value;
+  const value = await scanSkills({ extraDirs });
+  cached = { at: t, key, value };
   return value;
 }
 
 export function clearSkillCache() { cached = null; }
 
 /** The `/health` summary — counts and roots, never contents. */
-export async function skillsHealth() {
-  const { index, problems, quarantined } = await skillIndex();
+export async function skillsHealth(extraDirs = []) {
+  const { index, problems, quarantined } = await skillIndex({ extraDirs });
   const used = new Set([...index.values()].map((v) => v.root));
   return {
     count: index.size,
     // Only roots that actually contributed. A list of every path we looked in would be
     // mostly absent directories, and would say nothing about what the user has.
-    roots: skillRoots().filter((r) => used.has(r.dir)).map((r) => r.dir),
+    roots: skillRoots(process.env, os.homedir(), extraDirs).filter((r) => used.has(r.dir)).map((r) => r.dir),
     sources: [...new Set([...index.values()].map((v) => v.source))].sort(),
     ...(problems.length ? { problems: problems.length } : {}),
     // A count, not the contents. That there is a blocked skill is worth surfacing; the
@@ -369,7 +387,7 @@ export async function skillsHealth() {
 }
 
 /** The blocked skills, with their findings — for a client that wants to show them. */
-export async function quarantinedSkills() {
-  const { quarantined } = await skillIndex();
+export async function quarantinedSkills(extraDirs = []) {
+  const { quarantined } = await skillIndex({ extraDirs });
   return quarantined || [];
 }

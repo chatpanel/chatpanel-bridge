@@ -386,24 +386,24 @@ async function handleHealth(res) {
 // The three routes are the progressive-disclosure ladder, so a client pays for a
 // skill's body only when it picks one, and for a reference file only when it needs it.
 // --------------------------------------------------------------------------
-async function handleSkillsList(res) {
-  const { index, problems } = await skillIndex();
+async function handleSkillsList(res, extraDirs) {
+  const { index, problems } = await skillIndex({ extraDirs });
   json(res, 200, { ok: true, skills: listRecords(index), problems });
 }
 
-async function handleSkillsQuarantined(res) {
-  json(res, 200, { ok: true, quarantined: await quarantinedSkills() });
+async function handleSkillsQuarantined(res, extraDirs) {
+  json(res, 200, { ok: true, quarantined: await quarantinedSkills(extraDirs) });
 }
 
-async function handleSkillRead(res, name) {
-  const { index } = await skillIndex();
+async function handleSkillRead(res, name, extraDirs) {
+  const { index } = await skillIndex({ extraDirs });
   const skill = readRecord(index, name);
   if (!skill) return json(res, 404, { ok: false, error: 'unknown skill' });
   json(res, 200, { ok: true, skill });
 }
 
-async function handleSkillFile(res, name, relPath) {
-  const { index } = await skillIndex();
+async function handleSkillFile(res, name, relPath, extraDirs) {
+  const { index } = await skillIndex({ extraDirs });
   const out = await readPackageFile(index, name, relPath);
   // One shape for every refusal: a caller learns that it may not have the file, not
   // whether the path exists, which is the difference between an error and an oracle.
@@ -1065,16 +1065,21 @@ const server = createServer(async (req, res) => {
   if (blocked) return json(res, 403, { error: blocked });
   try {
     if (req.method === 'GET' && url.pathname === '/health') return handleHealth(res);
-    if (req.method === 'GET' && url.pathname === '/skills') return handleSkillsList(res);
-    if (req.method === 'GET' && url.pathname === '/skills-quarantined') return handleSkillsQuarantined(res);
+    // Custom skill folders the user configured in the extension, passed per request. They
+    // are the user's own absolute paths on their own machine; the bridge validates and
+    // scans them, and the same traversal/symlink guards apply to any file read from them.
+    const extraDirs = url.searchParams.getAll('dir');
+    if (req.method === 'GET' && url.pathname === '/skills') return handleSkillsList(res, extraDirs);
+    if (req.method === 'GET' && url.pathname === '/skills-quarantined') return handleSkillsQuarantined(res, extraDirs);
     if (req.method === 'GET' && url.pathname.startsWith('/skills/')) {
       const rest = url.pathname.slice('/skills/'.length);
       const cut = rest.indexOf('/file/');
-      if (cut === -1) return handleSkillRead(res, decodeURIComponent(rest));
+      if (cut === -1) return handleSkillRead(res, decodeURIComponent(rest), extraDirs);
       return handleSkillFile(
         res,
         decodeURIComponent(rest.slice(0, cut)),
         decodeURIComponent(rest.slice(cut + '/file/'.length)),
+        extraDirs,
       );
     }
     if (req.method === 'GET' && url.pathname === '/v1/models') return handleCompatibleModels(res);

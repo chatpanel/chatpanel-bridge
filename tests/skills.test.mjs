@@ -10,7 +10,7 @@ import { delimiter, join } from 'node:path';
 
 import {
   listRecords, parseFrontmatter, platformOk, readPackageFile, readRecord,
-  scanSkills, skillRecord, skillRoots, AGENT_SKILL_DIRS,
+  scanSkills, skillRecord, skillRoots, skillIndex, clearSkillCache, AGENT_SKILL_DIRS,
 } from '../src/skills.js';
 
 function fixture() {
@@ -359,5 +359,34 @@ test('a clean skill records its scan verdict on the origin', async () => {
     const rec = readRecord(index, 'a');
     assert.equal(rec.origin.scanned.verdict, 'clean');
     assert.equal(typeof rec.origin.scanned.scanner, 'number');
+  } finally { fx.cleanup(); }
+});
+
+test('a configured custom folder is scanned, but only if absolute', async () => {
+  // The user keeps skills somewhere else (say a synced repo). They configure the path and
+  // the bridge serves it — but a relative or empty entry is dropped, never resolved against
+  // the bridge's cwd.
+  const fx = fixture();
+  try {
+    fx.write('my-thing/SKILL.md', SKILL('my-thing'));
+    const roots = skillRoots({}, '/home/u', [fx.root, '', 'relative/path', '   ']);
+    const ext = roots.filter((r) => r.source === 'external');
+    assert.equal(ext.length, 1, 'only the absolute path is added');
+    assert.equal(ext[0].dir, fx.root);
+    const { index } = await scanSkills({ extraDirs: [fx.root] });
+    assert.ok(index.has('my-thing'), 'and its skills are found');
+  } finally { fx.cleanup(); }
+});
+
+test('the scan cache is keyed by the custom folders', async () => {
+  // A scan with extra dirs must not be served by a cached one without them.
+  const fx = fixture();
+  try {
+    fx.write('cached-thing/SKILL.md', SKILL('cached-thing'));
+    const t = () => 1000; // frozen clock — same instant, so only the key can differ
+    const withNone = await skillIndex({ now: t, extraDirs: [] });
+    const withDir = await skillIndex({ now: t, extraDirs: [fx.root] });
+    assert.equal(withNone.index.has('cached-thing'), false);
+    assert.equal(withDir.index.has('cached-thing'), true, 'a different key must re-scan, not serve the stale one');
   } finally { fx.cleanup(); }
 });
