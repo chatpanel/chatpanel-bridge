@@ -275,10 +275,29 @@ const PRIVILEGED_POST = new Set([
   // guarded neighbours is a hole regardless of how little it grants.
   '/cancel',
 ]);
-const PRIVILEGED_GET = new Set(['/debug', '/skills']);
-// /skills/<name>… reads files from the user's disk, so it needs the same caller proof as
-// the exact-match entries above; a Set cannot express the prefix.
-const isPrivilegedGetPath = (p) => PRIVILEGED_GET.has(p) || p.startsWith('/skills/');
+const PRIVILEGED_GET = new Set(['/debug']);
+
+// /skills* is NOT privileged, and that is a considered position rather than a
+// convenience. `privileged` adds exactly one thing over the origin allowlist: it requires
+// the Origin header to be PRESENT, so a no-Origin local process cannot pose as the
+// extension. Work through who that actually excludes for a read-only listing of files:
+//
+//   • a web page — always sends Origin, and a non-allowed one is already refused above;
+//   • a page on http://localhost — sends Origin, which `isExtensionOrigin` already
+//     accepts, so the privileged check never stopped it either way;
+//   • a page using <img>/<script> to force a no-Origin GET — cannot read the response,
+//     because it is JSON with no CORS grant to that origin;
+//   • remote SSRF into 127.0.0.1 — arrives with a non-loopback Host and dies at
+//     `hostAllowed` long before this;
+//   • a local process — the only caller left, and it can read the very same SKILL.md
+//     files straight off the disk.
+//
+// So the requirement excluded nothing that could not already read the bytes, while
+// breaking the one client that should have them: Chrome omits Origin on a simple GET from
+// an extension page (the POST routes get it only because a JSON body forces a preflight).
+// The origin allowlist stays and is what keeps web pages out. /debug remains privileged —
+// it exposes configuration a local process cannot otherwise see.
+const isPrivilegedGetPath = (p) => PRIVILEGED_GET.has(p);
 
 // SSRF guard for /mcp-remote lives in ./ssrf.js (assertPublicHttpUrl). Loopback
 // is allowed (the user's own localhost MCP server — the common "via bridge"
