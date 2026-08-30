@@ -92,10 +92,25 @@ npm start                    # → http://127.0.0.1:4319
 | `POST` | `/v1/completions` | OpenAI-compatible legacy text Completions (streaming and non-streaming) |
 | `POST` | `/v1/responses` | OpenAI-compatible Responses API (streaming and non-streaming) |
 | `POST` | `/v1/messages` | Anthropic-compatible Messages API (streaming and non-streaming) |
+| `GET`  | `/skills` | skills installed on this machine, across every agent harness + configured folders |
+| `GET`  | `/skills/<name>` · `/skills/<name>/file/<path>` | one skill's instructions · one reference file |
+| `POST` | `/mcp` | MCP endpoint — `chatpanel_skill_*` tools any CLI can call (plus browser tools while a ChatPanel chat is driving) |
 
 `/chat` streams Server-Sent Events: `{type:'delta',text}` as the answer is
 generated, `{type:'tool',name,summary}` / `{type:'status'}` for activity, and a
 final `{type:'done'}` (or `{type:'error',error}`).
+
+### Use your skills from any CLI
+
+The bridge discovers the skills installed on your machine — Claude Code, Codex, Copilot,
+Gemini, Hermes, `~/.agents/skills`, and any folder you configure — and exposes them as MCP
+tools (`chatpanel_skill_list` / `_open` / `_read`). Point any MCP client at
+`http://127.0.0.1:4319/mcp` and it can list and load them with no browser open.
+
+For **one** server that adds your local **history** (chats, meetings, notes — redacted)
+*alongside* your skills, add the
+[Privacy Gateway](https://github.com/chatpanel/chatpanel-gateway) instead and point your CLI
+at `chatpanel-gateway mcp`. The gateway proxies these skill tools and puts redaction in front.
 
 `options` per agent (set in ChatPanel Settings):
 
