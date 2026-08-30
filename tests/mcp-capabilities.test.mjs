@@ -31,7 +31,7 @@ function withSkill(fn) {
 test('the capability tools are namespaced and self-describing', () => {
   const specs = capabilityToolSpecs();
   const names = specs.map((s) => s.name);
-  assert.deepEqual(names, ['chatpanel_skill_list', 'chatpanel_skill_open', 'chatpanel_skill_read']);
+  assert.deepEqual(names, ['chatpanel_skill_list', 'chatpanel_skill_open', 'chatpanel_skill_read', 'chatpanel_sanitize_text']);
   for (const s of specs) {
     assert.ok(s.name.startsWith('chatpanel_'), 'ours are namespaced so they never clash with a page tool');
     assert.ok(s.description.length > 20, 'a CLI shows this to its model — it has to say what the tool is for');
@@ -64,6 +64,17 @@ test('a scripts path is refused as a text read even here', async () => {
     const out = await runCapabilityTool('chatpanel_skill_read', { name: 'demo', path: 'scripts/run.sh' });
     assert.ok(out.isError || /scripts|Could not/.test(out.content[0].text));
   });
+});
+
+test('sanitize strips hidden and look-alike characters', async () => {
+  // Bridge-native security hygiene — a real capability, honestly scoped (not full PII).
+  const out = await runCapabilityTool('chatpanel_sanitize_text', { text: 'hi\u200bthere\u202eevil' });
+  const d = JSON.parse(out.content[0].text);
+  assert.equal(d.hadHiddenCharacters, true);
+  assert.ok(d.removed >= 2);
+  assert.equal(d.clean, 'hithereevil', 'the invisible channels are gone');
+  const clean = await runCapabilityTool('chatpanel_sanitize_text', { text: 'ordinary text' });
+  assert.equal(JSON.parse(clean.content[0].text).hadHiddenCharacters, false);
 });
 
 test('an unknown skill and an unknown tool are handled, not thrown', async () => {

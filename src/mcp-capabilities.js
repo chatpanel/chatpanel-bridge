@@ -18,6 +18,7 @@
 // not a tool to switch on by default.
 
 import { skillIndex, listRecords, readRecord, readPackageFile } from './skills.js';
+import { sanitizeUnicode, hasHiddenChars } from './sanitize.js';
 
 const MAX_REF = 24_000;
 
@@ -84,6 +85,35 @@ export function capabilityTools() {
         if (out.error) return text(`Could not read it: ${out.error}`, true);
         const body = out.text.length > MAX_REF ? `${out.text.slice(0, MAX_REF)}\n\n…[truncated]` : out.text;
         return text(body);
+      },
+    },
+    {
+      // Bridge-native security hygiene: strip the invisible and look-alike characters used to
+      // smuggle instructions past a human reader — a real risk for a CLI processing pasted or
+      // fetched text. This is the unicode layer, honestly scoped: it is NOT full PII redaction
+      // (names, emails), which lives in the gateway with the complete engine. Naming it
+      // precisely matters more than sounding capable.
+      name: 'chatpanel_sanitize_text',
+      description:
+        'Remove hidden and look-alike Unicode characters from text (zero-width joiners, '
+        + 'bidirectional overrides, the tag block, homoglyphs) — the tricks used to hide '
+        + 'instructions from a human while a model still sees them. Returns the cleaned text and '
+        + 'what was removed. Use before trusting text pasted or fetched from an untrusted source. '
+        + 'This is not full PII redaction (names, emails) — that lives in the ChatPanel gateway.',
+      schema: {
+        type: 'object',
+        properties: { text: { type: 'string', description: 'The text to sanitize.' } },
+        required: ['text'],
+      },
+      async run(args) {
+        const input = String(args?.text ?? '');
+        const { clean, removed, findings } = sanitizeUnicode(input);
+        return text(JSON.stringify({
+          clean,
+          hadHiddenCharacters: hasHiddenChars(input),
+          removed: removed || 0,
+          findings: findings || {}, // per-category counts, e.g. { bidi: 1, zeroWidth: 2 }
+        }, null, 2));
       },
     },
   ];
