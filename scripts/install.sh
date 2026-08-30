@@ -4,9 +4,22 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/chatpanel/chatpanel-bridge/main/scripts/install.sh | bash
 #
+# Add the optional privacy gateway (redaction, model routing, voice) in the same flow:
+#   curl -fsSL https://dl.chatpanel.net/bridge/install.sh | bash -s -- --gateway
+#
 # Downloading via curl means the file is NOT quarantined, so macOS won't show the
 # "damaged / unidentified developer" prompt that browser downloads trigger.
 set -euo pipefail
+
+# --gateway also installs the ChatPanel Privacy Gateway — the optional upgrade that adds
+# PII redaction, model routing and voice in front of everything the bridge does. The bridge
+# is the common case and is always installed; the gateway is opt-in and heavier.
+WITH_GATEWAY=0
+for a in "$@"; do
+  case "$a" in
+    --gateway|--with-gateway) WITH_GATEWAY=1 ;;
+  esac
+done
 
 os="$(uname -s)"
 arch="$(uname -m)"
@@ -59,3 +72,23 @@ case ":${PATH}:" in
   *":${dest}:"*) : ;;
   *) echo "Tip: add it to your PATH ->  export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
 esac
+
+if [ "$WITH_GATEWAY" = "1" ]; then
+  echo
+  echo "Adding the ChatPanel Privacy Gateway (optional upgrade)..."
+  # One download story: the gateway installer lives at the same dl host. A gateway failure
+  # must not fail the bridge install — the bridge is already up.
+  if curl -fsSL https://dl.chatpanel.net/gateway/install.sh | bash; then
+    echo "Gateway installed. One MCP config now gives any CLI your history + skills, redacted:"
+    echo "    chatpanel-gateway mcp"
+  else
+    echo "Gateway install didn't complete — the bridge is unaffected. Retry any time:"
+    echo "    curl -fsSL https://dl.chatpanel.net/gateway/install.sh | bash"
+  fi
+else
+  echo
+  echo "Optional upgrade — the Privacy Gateway adds PII redaction, model routing and voice,"
+  echo "and lets any CLI (Codex, Claude Code) reach your history + skills through one MCP server:"
+  echo "    curl -fsSL https://dl.chatpanel.net/gateway/install.sh | bash"
+  echo "  (or re-run this with --gateway to add it now.)"
+fi

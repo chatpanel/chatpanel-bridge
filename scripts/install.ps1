@@ -52,3 +52,7 @@ if ($installed) {
   Write-Host "  `"$bin`""
 }
 Write-Host "Manage it:  `"$bin`" --status  |  --uninstall"
+Write-Host ""
+Write-Host "Optional upgrade - the Privacy Gateway adds PII redaction, model routing and voice," -ForegroundColor Gray
+Write-Host "and lets any CLI reach your history + skills through one MCP server:" -ForegroundColor Gray
+Write-Host "  irm https://dl.chatpanel.net/gateway/install.ps1 | iex"
