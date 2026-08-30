@@ -9,6 +9,7 @@
 //                     {type:'delta', text}    incremental assistant text
 //                     {type:'tool',  name, summary}
 //                     {type:'status'|'reasoning', text?}
+//                     {type:'workdir', path, isDefault}  where this run writes
 //                     {type:'done',  text?}    (text only if not streamed)
 //                     {type:'error', error}
 //   POST /v1/chat/completions, /v1/completions, /v1/responses
@@ -37,6 +38,7 @@ import { connectorsFor } from './connectors.js';
 import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
 import { skillIndex, listRecords, readRecord, readPackageFile, skillsHealth } from './skills.js';
+import { DEFAULT_WORKSPACE, isDefaultWorkdir, resolveWorkdir, writeScopeNote } from './workdir.js';
 import { AGENT_CLIS, enrichPath, enrichAgentEnv, findAgentBin, resolveCommand } from './env.js';
 import { stripHidden } from './sanitize.js';
 import { checkForUpdate, selfUpdate } from './update.js';
@@ -64,7 +66,7 @@ import {
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.29';
+const VERSION = '0.10.30';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -366,7 +368,13 @@ async function handleHealth(res) {
   // an older bridge simply omits it, which is what stops a newer extension assuming the
   // endpoints exist. Never let a scan failure cost the caller its health check.
   const skills = await skillsHealth().catch(() => null);
-  json(res, 200, { ok: true, version: VERSION, agents, update, ...(skills ? { skills } : {}) });
+  // So Settings can show what a blank "Working directory" actually resolves to, instead
+  // of leaving the user to discover it from where their files did not appear.
+  json(res, 200, {
+    ok: true, version: VERSION, agents, update,
+    workspace: DEFAULT_WORKSPACE,
+    ...(skills ? { skills } : {}),
+  });
 }
 
 // --------------------------------------------------------------------------
@@ -479,6 +487,21 @@ async function handleChat(req, res) {
 
   const safeEmit = (obj) => { if (!closed) emit(obj); };
   emit({ type: 'run', id: runId });
+
+  // WHERE THIS RUN WILL WRITE, said before it starts. "The agent created a file and I
+  // cannot find it" was the single most confusing thing about a CLI agent, and the answer
+  // used to depend on which engine answered — the filesystem root, the home directory, or
+  // a temp folder the OS clears on its own schedule. Now there is one answer and it is
+  // announced. Additive: a client that does not know `workdir` ignores it, and the same
+  // information is repeated as a `status` line, which every client already renders.
+  {
+    const dir = resolveWorkdir(body.options?.workingDir);
+    const chosen = !isDefaultWorkdir(body.options?.workingDir);
+    const scope = writeScopeNote(body.agent, body.options?.permissionMode, dir);
+    emit({ type: 'workdir', path: dir, isDefault: !chosen, writeScope: scope || undefined });
+    emit({ type: 'status', text: `Working in ${dir}${chosen ? '' : ' (default)'}` });
+    if (scope) emit({ type: 'status', text: scope });
+  }
 
   // Browser-tools relay: when the extension sends page-tool specs, host an MCP
   // server for this turn and tell the engine to point the CLI at it.

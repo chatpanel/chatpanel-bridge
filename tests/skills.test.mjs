@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, join } from 'node:path';
 
 import {
   listRecords, parseFrontmatter, platformOk, readPackageFile, readRecord,
@@ -115,9 +115,30 @@ test('only ChatPanel’s own directory is writable', () => {
 
 test('extra directories are appended, never inserted ahead of the known ones', () => {
   const base = skillRoots({}, '/home/u').length;
-  const withExtra = skillRoots({ CHATPANEL_SKILL_DIRS: '/team/skills:/other' }, '/home/u');
+  const sep = process.platform === 'win32' ? ';' : ':';
+  const withExtra = skillRoots({ CHATPANEL_SKILL_DIRS: `/team/skills${sep}/other` }, '/home/u');
   assert.equal(withExtra.length, base + 2);
   assert.deepEqual(withExtra.slice(-2).map((r) => r.source), ['external', 'external']);
+});
+
+test('the list separator is the platform’s, so a drive letter is not a separator', () => {
+  // ':' is the POSIX list separator AND part of every absolute Windows path. Splitting on
+  // a fixed set turned "C:\\Users\\me\\skills" into "C" and "\\Users\\me\\skills" on
+  // Windows — two directories, neither of which exists. Using path.delimiter means each
+  // platform splits on its own character and treats the other one as ordinary text, which
+  // is the property asserted here rather than one platform's spelling of it.
+  const extras = (v) => skillRoots({ CHATPANEL_SKILL_DIRS: v }, '/home/u').filter((r) => r.source === 'external');
+  const other = delimiter === ';' ? ':' : ';';
+  assert.equal(extras(`/a${delimiter}/b`).length, 2, 'the platform separator splits');
+  assert.equal(extras(`/a${other}b`).length, 1, 'the other platform’s separator is just a character');
+  if (delimiter === ';') {
+    assert.equal(extras('C:\\Users\\me\\skills').length, 1, 'a drive letter survives on Windows');
+  }
+});
+
+test('newlines separate directories on every platform', () => {
+  const roots = skillRoots({ CHATPANEL_SKILL_DIRS: '/a\n/b\n\n  /c  ' }, '/home/u');
+  assert.equal(roots.filter((r) => r.source === 'external').length, 3, 'blank lines are skipped');
 });
 
 test('a scan finds flat and one-level-nested skills, and their files', async () => {

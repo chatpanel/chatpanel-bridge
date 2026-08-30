@@ -36,7 +36,7 @@
 import { readFile as fsReadFile, readdir, stat, realpath } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
-import { join, resolve, sep } from 'node:path';
+import { delimiter, join, resolve, sep } from 'node:path';
 import { isSafeSkillPath, normalizeSkill, SKILL_FILE_KINDS } from './events/skill-manifest.js';
 
 const MAX_SKILL_MD = 512 * 1024;   // a procedure document, not a corpus
@@ -81,8 +81,12 @@ export const AGENT_SKILL_DIRS = Object.freeze([
  * that edits another tool's configuration directory is a tool people uninstall.
  */
 export function skillRoots(env = process.env, home = os.homedir()) {
+  // Split on the PLATFORM's list separator, not a fixed set. Splitting on ':' everywhere
+  // cut "C:\\Users\\me\\skills" into "C" and "\\Users\\me\\skills" on Windows, which is the
+  // one platform where a drive letter makes that character part of an ordinary path.
   const extra = String(env.CHATPANEL_SKILL_DIRS || '')
-    .split(/[:;\n]/)
+    .split(/\r?\n/)
+    .flatMap((line) => line.split(delimiter))
     .map((s) => s.trim())
     .filter(Boolean);
   return [
@@ -213,6 +217,9 @@ async function loadSkill(dir, relPath, source) {
   }
   const { meta, body } = parseFrontmatter(text);
   const hash = `sha256-${createHash('sha256').update(text).digest('hex').slice(0, 32)}`;
+  // relPath is an IDENTITY, not a filesystem path: it is built with '/' on every platform
+  // so a skill's origin.id is the same string on Windows and macOS. Do not "fix" this to
+  // path.sep — that would make the same skill look like two different ones per platform.
   const dirName = relPath.split('/').pop();
   const files = await packageFiles(dir);
   const skill = skillRecord({ meta, body, dirName, relPath, source, files, hash });
@@ -278,6 +285,8 @@ export async function readPackageFile(index, name, relPath) {
   const hit = index.get(String(name || ''));
   if (!hit) return { error: 'unknown skill' };
   if (!isSafeSkillPath(relPath)) return { error: 'unsafe path' };
+  // '/' by wire contract — the HTTP path is URL-shaped, and isSafeSkillPath already
+  // refuses backslashes, so a Windows-style separator never reaches here.
   const kind = String(relPath).split('/')[0];
   if (!SKILL_FILE_KINDS.includes(kind)) return { error: 'unsafe path' };
 

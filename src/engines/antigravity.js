@@ -18,9 +18,9 @@ import { findAgentBin } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
 import { killOnAbort, spawnGroupOpts } from '../proc.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
+import { resolveWorkdir } from '../workdir.js';
 
 const IDLE_MS = Number(process.env.CHATPANEL_AGY_TIMEOUT_MS) || 180_000;
-const SCRATCH = path.join(os.tmpdir(), 'chatpanel-agy-scratch');
 
 // `agy models` lists available models. Parse ids best-effort; free text is still
 // accepted by the picker, and [] just means "type a model or use the default".
@@ -81,12 +81,7 @@ function writeImages(images, dir) {
 }
 
 export async function chat({ messages, system, options, images }, emit, { signal } = {}) {
-  try {
-    mkdirSync(SCRATCH, { recursive: true });
-  } catch {
-    /* best effort */
-  }
-  const cwd = options.workingDir ? path.resolve(options.workingDir) : SCRATCH;
+  const cwd = resolveWorkdir(options.workingDir);
 
   // Images: write into the cwd (workspace) and reference with `@<file>` — agy
   // reads @-referenced files (incl. images) inline as multimodal input, so no

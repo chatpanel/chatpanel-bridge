@@ -21,6 +21,7 @@ import { resolveClaude, buildSpawnSpec, isCompiledBinary, selfMcpStdio } from '.
 import { buildCliPrompt } from './prompt.js';
 import { killOnAbort } from '../proc.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
+import { displayPath, resolveWorkdir } from '../workdir.js';
 
 // Write base64 data-URL images to temp files. Claude Code reads them with its
 // Read tool (which feeds images to the model as vision), so we just reference the
@@ -141,7 +142,7 @@ function runClaude({ prompt, args, cwd, emit, signal }) {
         } catch {
           continue; // not a JSON event line
         }
-        const r = handleMessage(msg, emit, streamedAny);
+        const r = handleMessage(msg, emit, streamedAny, cwd);
         if (r.streamed) streamedAny = true;
         if (r.result != null) resultText = r.result;
       }
@@ -168,7 +169,7 @@ function runClaude({ prompt, args, cwd, emit, signal }) {
 // Map one stream-json message to emit() calls. Returns { streamed, result }.
 // The CLI's stream-json mirrors the SDK message shapes. Exported so the custom
 // engine can reuse it for agents that emit Claude-style stream-json.
-export function handleMessage(msg, emit, alreadyStreamed) {
+export function handleMessage(msg, emit, alreadyStreamed, cwdForSteps = '') {
   const out = { streamed: false, result: null };
   if (msg.type === 'stream_event') {
     const ev = msg.event;
@@ -183,7 +184,7 @@ export function handleMessage(msg, emit, alreadyStreamed) {
   } else if (msg.type === 'assistant') {
     for (const block of msg.message?.content || []) {
       if (block.type === 'tool_use') {
-        emit({ type: 'tool', name: block.name, summary: toolSummary(block) });
+        emit({ type: 'tool', name: block.name, summary: toolSummary(block, cwdForSteps) });
       } else if (block.type === 'text' && !alreadyStreamed) {
         out.streamed = true;
         emit({ type: 'delta', text: block.text });
@@ -214,7 +215,7 @@ export function handleMessage(msg, emit, alreadyStreamed) {
 export async function chat({ messages, system, options, images }, emit, { signal } = {}) {
   const permissionMode = options.permissionMode || 'default';
   // Explicit project dir, else null → CLI runs in home (or WSL home).
-  const cwd = options.workingDir ? path.resolve(options.workingDir) : null;
+  const cwd = resolveWorkdir(options.workingDir);
 
   const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const args = ['--print', '--output-format', 'stream-json', '--include-partial-messages', '--verbose'];
@@ -308,10 +309,12 @@ export async function complete({ prompt, system, model }) {
   return (text || resultText || '').trim();
 }
 
-function toolSummary(block) {
+function toolSummary(block, cwd = '') {
   const i = block.input || {};
   if (i.command) return String(i.command).slice(0, 60);
-  if (i.file_path) return path.basename(i.file_path);
+  // Relative to the working directory rather than a bare basename: "src/foo.js" says
+  // where the file is, "foo.js" left the user guessing which of four roots it meant.
+  if (i.file_path) return displayPath(i.file_path, cwd);
   if (i.pattern) return i.pattern;
   if (i.url) return i.url;
   if (i.description) return String(i.description).slice(0, 80); // Task (subagent) — what it's for
@@ -346,7 +349,7 @@ async function sdkChat({ messages, system, options }, emit, { signal } = {}) {
   }
 
   const permissionMode = options.permissionMode || 'default';
-  const cwd = options.workingDir ? path.resolve(options.workingDir) : os.homedir();
+  const cwd = resolveWorkdir(options.workingDir);
   const writesAllowed = permissionMode === 'acceptEdits' || permissionMode === 'bypassPermissions';
   const readonly = new Set(READONLY_TOOLS);
   const canUseTool = async (toolName) =>
@@ -374,7 +377,7 @@ async function sdkChat({ messages, system, options }, emit, { signal } = {}) {
   });
   try {
     for await (const message of iterator) {
-      const r = handleMessage(message, emit, streamedAny);
+      const r = handleMessage(message, emit, streamedAny, cwd);
       if (r.streamed) streamedAny = true;
       if (r.result != null) resultText = r.result;
     }

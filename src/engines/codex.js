@@ -23,6 +23,7 @@ import path from 'node:path';
 import { findAgentBin, selfMcpStdio } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
+import { resolveWorkdir } from '../workdir.js';
 
 // Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
 // streaming never trips it — only true silence does. Override with
@@ -30,7 +31,6 @@ import { pushExtraArgs, FORBIDDEN } from './args.js';
 const IDLE_MS = Number(process.env.CHATPANEL_CODEX_TIMEOUT_MS) || 180_000;
 const REASONING = process.env.CHATPANEL_CODEX_EFFORT ?? 'low'; // '' → respect config
 
-const SCRATCH = path.join(os.tmpdir(), 'chatpanel-codex-scratch');
 
 // Codex has no "list models" command — its model lives in CODEX_HOME/config.toml
 // (e.g. `model = "gpt-5.5"`). Surface the user's REAL configured model(s), read
@@ -49,13 +49,6 @@ export async function listModels() {
 }
 const ISO_HOME = path.join(os.homedir(), '.chatpanel', 'codex-home');
 
-function ensureScratch() {
-  try {
-    mkdirSync(SCRATCH, { recursive: true });
-  } catch {
-    /* best effort */
-  }
-}
 
 // Build (once) an isolated CODEX_HOME that has only a link to your auth, so the
 // global skills/config don't load. Returns the path, or null on failure.
@@ -139,13 +132,12 @@ async function writeImages(images, tag) {
 }
 
 export async function chat({ messages, system, options, images }, emit, { signal } = {}) {
-  ensureScratch();
   const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const outFile = path.join(os.tmpdir(), `chatpanel-codex-${tag}.txt`);
   const imageFiles = await writeImages(images, tag);
   const cleanupImages = () => imageFiles.forEach((f) => unlink(f).catch(() => {}));
 
-  const cwd = options.workingDir ? path.resolve(options.workingDir) : SCRATCH;
+  const cwd = resolveWorkdir(options.workingDir);
   const args = ['exec', '--json', '--skip-git-repo-check', '-o', outFile];
   // Headless exec has no human to approve actions. With MCP/browser tools armed
   // Codex would otherwise raise an approval prompt it can't show — and cancel the

@@ -23,6 +23,7 @@ import { killOnAbort } from '../proc.js';
 import { buildCliPrompt } from './prompt.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
 import { createStreamParser, STREAM_FORMATS, stripAnsi } from './stream-formats.js';
+import { resolveWorkdir } from '../workdir.js';
 
 // Write base64 data-URL images to temp files so a custom CLI can take them via
 // its configured `imageArg` template (e.g. "-i {path}", "@{path}"). Returns paths.
@@ -383,7 +384,7 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
   }
 
   const prompt = buildCliPrompt(messages, system);
-  let cwd = options.workingDir ? path.resolve(options.workingDir) : null;
+  let cwd = resolveWorkdir(options.workingDir);
   const label = spec.label || spec.command;
   // Output dialect — resolved against the stream-format registry, so a new agent
   // brings a format by NAME instead of a new branch in this runner. Unknown /
