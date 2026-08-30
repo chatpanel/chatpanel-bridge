@@ -10,7 +10,7 @@ import { join } from 'node:path';
 
 import {
   listRecords, parseFrontmatter, platformOk, readPackageFile, readRecord,
-  scanSkills, skillRecord, skillRoots,
+  scanSkills, skillRecord, skillRoots, AGENT_SKILL_DIRS,
 } from '../src/skills.js';
 
 function fixture() {
@@ -91,13 +91,33 @@ test('platform restrictions are honoured', () => {
   assert.equal(platformOk({}, 'win32'), true, 'no restriction means everywhere');
 });
 
-test('roots put ChatPanel first and read the cross-tool directory second', () => {
+test('roots cover every agent CLI, ChatPanel first', () => {
+  // The same skill really is copied into several of these at once, so the ORDER is the
+  // answer to "which copy gets shown" — and it has to be stable between scans.
   const roots = skillRoots({}, '/home/u');
-  assert.deepEqual(roots.map((r) => r.dir), ['/home/u/.chatpanel/skills', '/home/u/.agents/skills']);
-  assert.equal(roots[0].writable, true);
-  assert.equal(roots[1].writable, false, 'a directory another tool owns is never written');
+  assert.deepEqual(roots.slice(0, 4).map((r) => r.dir), [
+    '/home/u/.chatpanel/skills',
+    '/home/u/.agents/skills',
+    '/home/u/.claude/skills',
+    '/home/u/.codex/skills',
+  ]);
+  for (const agent of ['claude', 'codex', 'copilot', 'gemini', 'opencode', 'kiro', 'pi', 'hermes']) {
+    assert.ok(roots.some((r) => r.source === agent), `${agent} should be scanned`);
+  }
+  assert.ok(roots.every((r) => r.label), 'every root needs a name — it is shown as provenance');
+});
+
+test('only ChatPanel’s own directory is writable', () => {
+  // A tool that edits another tool's configuration directory is a tool people uninstall.
+  const roots = skillRoots({}, '/home/u');
+  assert.deepEqual(roots.filter((r) => r.writable).map((r) => r.source), ['local']);
+});
+
+test('extra directories are appended, never inserted ahead of the known ones', () => {
+  const base = skillRoots({}, '/home/u').length;
   const withExtra = skillRoots({ CHATPANEL_SKILL_DIRS: '/team/skills:/other' }, '/home/u');
-  assert.equal(withExtra.length, 4);
+  assert.equal(withExtra.length, base + 2);
+  assert.deepEqual(withExtra.slice(-2).map((r) => r.source), ['external', 'external']);
 });
 
 test('a scan finds flat and one-level-nested skills, and their files', async () => {
@@ -129,6 +149,17 @@ test('the first root wins a name clash', async () => {
     });
     assert.equal(readRecord(index, 'shared').origin.source, 'local');
   } finally { a.cleanup(); b.cleanup(); }
+});
+
+test('the same skill in several agent folders resolves to one, deterministically', () => {
+  // The real machine case: ~/.claude/skills, ~/.copilot/skills and ~/.gemini/skills each
+  // hold their own COPY of the same skill. Whichever root comes first wins, every scan.
+  const seen = new Set();
+  for (const d of AGENT_SKILL_DIRS) {
+    assert.equal(seen.has(d.source), false, `duplicate source id '${d.source}'`);
+    seen.add(d.source);
+  }
+  assert.equal(AGENT_SKILL_DIRS[0].source, 'local', 'ChatPanel’s own copy always wins');
 });
 
 test('a skill for another platform is not indexed', async () => {

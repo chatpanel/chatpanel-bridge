@@ -45,11 +45,40 @@ const MAX_SKILLS = 500;            // a scan is bounded work, not "whatever is o
 const MAX_DEPTH = 2;               // <root>/<name>/ and <root>/<category>/<name>/
 
 /**
- * Where skills are scanned from, in precedence order — first hit wins on a name clash,
- * which makes ChatPanel's own directory authoritative over a shared one.
+ * The agent CLIs that keep skills in a well-known directory, and what to call each one.
  *
- * `~/.agents/skills` is the cross-tool location; it is READ, never written, because it
- * belongs to whatever else the user runs.
+ * Every one of these stores the SAME agentskills.io layout — `<name>/SKILL.md` plus
+ * optional `references/`. In practice a machine ends up with the same skill copied into
+ * several of them, which is the duplication the shared `~/.agents/skills` convention
+ * exists to end and has not yet. Reading all of them is what lets ChatPanel show the
+ * user's actual skills rather than the subset that happens to live in one folder.
+ *
+ * Ordered: ChatPanel's own directory, then the cross-tool convention, then each agent.
+ * The order IS the precedence — see skillRoots.
+ */
+export const AGENT_SKILL_DIRS = Object.freeze([
+  { source: 'local', label: 'ChatPanel', segments: ['.chatpanel', 'skills'], writable: true },
+  { source: 'agents-dir', label: 'Shared (~/.agents)', segments: ['.agents', 'skills'] },
+  { source: 'claude', label: 'Claude Code', segments: ['.claude', 'skills'] },
+  { source: 'codex', label: 'Codex', segments: ['.codex', 'skills'] },
+  { source: 'copilot', label: 'GitHub Copilot', segments: ['.copilot', 'skills'] },
+  { source: 'gemini', label: 'Antigravity / Gemini', segments: ['.gemini', 'skills'] },
+  { source: 'opencode', label: 'OpenCode', segments: ['.opencode', 'skills'] },
+  { source: 'kiro', label: 'Kiro', segments: ['.kiro', 'skills'] },
+  { source: 'pi', label: 'Pi', segments: ['.pi', 'skills'] },
+  { source: 'hermes', label: 'Hermes', segments: ['.hermes', 'skills'] },
+]);
+
+/**
+ * Where skills are scanned from, in precedence order — first hit wins on a name clash.
+ *
+ * ChatPanel's own directory is authoritative, then the shared cross-tool one, then each
+ * agent's. That order matters because the same skill genuinely does exist in several of
+ * these at once: whichever root answers first is the copy that gets shown, and a stable
+ * order means the answer does not change between scans.
+ *
+ * Only the first is written. The rest belong to whatever else the user runs, and a tool
+ * that edits another tool's configuration directory is a tool people uninstall.
  */
 export function skillRoots(env = process.env, home = os.homedir()) {
   const extra = String(env.CHATPANEL_SKILL_DIRS || '')
@@ -57,9 +86,13 @@ export function skillRoots(env = process.env, home = os.homedir()) {
     .map((s) => s.trim())
     .filter(Boolean);
   return [
-    { dir: join(home, '.chatpanel', 'skills'), source: 'local', writable: true },
-    { dir: join(home, '.agents', 'skills'), source: 'agents-dir', writable: false },
-    ...extra.map((dir) => ({ dir: resolve(dir), source: 'external', writable: false })),
+    ...AGENT_SKILL_DIRS.map((d) => ({
+      dir: join(home, ...d.segments),
+      source: d.source,
+      label: d.label,
+      writable: !!d.writable,
+    })),
+    ...extra.map((dir) => ({ dir: resolve(dir), source: 'external', label: 'Custom', writable: false })),
   ];
 }
 
@@ -289,9 +322,13 @@ export function clearSkillCache() { cached = null; }
 /** The `/health` summary — counts and roots, never contents. */
 export async function skillsHealth() {
   const { index, problems } = await skillIndex();
+  const used = new Set([...index.values()].map((v) => v.root));
   return {
     count: index.size,
-    roots: skillRoots().filter((r) => [...index.values()].some((v) => v.root === r.dir)).map((r) => r.dir),
+    // Only roots that actually contributed. A list of every path we looked in would be
+    // mostly absent directories, and would say nothing about what the user has.
+    roots: skillRoots().filter((r) => used.has(r.dir)).map((r) => r.dir),
+    sources: [...new Set([...index.values()].map((v) => v.source))].sort(),
     ...(problems.length ? { problems: problems.length } : {}),
   };
 }
