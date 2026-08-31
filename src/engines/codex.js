@@ -24,6 +24,7 @@ import { findAgentBin, selfMcpStdio } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
 import { resolveWorkdir } from '../workdir.js';
+import { summarizeCliError } from '../cli-errors.js';
 
 // Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
 // streaming never trips it — only true silence does. Override with
@@ -238,7 +239,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
         emit({ type: 'done', text: '' });
         resolve();
       } else {
-        reject(new Error(`Codex exited ${code}: ${stderr.trim() || 'failed'}`));
+        reject(new Error(summarizeCliError('Codex', code, stderr)));
       }
     });
 

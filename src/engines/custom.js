@@ -621,7 +621,7 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
         emit({ type: 'done', text: parser.streamed ? '' : parser.finish() });
         resolve();
       } else {
-        reject(new Error(`${label} exited ${code}: ${stderr.trim().split('\n').pop() || 'failed'}`));
+        reject(new Error(summarizeCliError(label, code, stderr)));
       }
     });
 

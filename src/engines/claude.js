@@ -19,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { resolveClaude, buildSpawnSpec, isCompiledBinary, selfMcpStdio } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
+import { summarizeCliError } from '../cli-errors.js';
 import { killOnAbort } from '../proc.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
 import { displayPath, resolveWorkdir } from '../workdir.js';
@@ -160,7 +161,7 @@ function runClaude({ prompt, args, cwd, emit, signal }) {
       detach();
       if (signal?.aborted) { resolve({ streamedAny, resultText }); return; } // Stop pressed — end quietly
       if (code === 0) resolve({ streamedAny, resultText });
-      else reject(new Error(`Claude Code exited ${code}: ${stderr.trim().split('\n').pop() || 'failed'}`));
+      else reject(new Error(summarizeCliError('Claude Code', code, stderr)));
     });
 
     child.stdin.write(prompt);

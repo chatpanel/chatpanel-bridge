@@ -16,6 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
+import { summarizeCliError } from '../cli-errors.js';
 import { killOnAbort, spawnGroupOpts } from '../proc.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
 import { resolveWorkdir } from '../workdir.js';
@@ -153,7 +154,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
         emit({ type: 'done', text: '' });
         resolve();
       } else {
-        reject(new Error(`Antigravity exited ${code}: ${err.trim() || out.trim() || 'failed'}`));
+        reject(new Error(summarizeCliError('Antigravity', code, err, out)));
       }
     });
   });
