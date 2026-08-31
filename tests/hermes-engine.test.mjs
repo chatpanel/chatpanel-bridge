@@ -10,7 +10,7 @@ import { hermes } from '../src/engines/cli-agents.js';
 test('the spec matches the CLI contract', () => {
   const s = hermes.spec;
   assert.equal(s.command, 'hermes');
-  assert.equal(s.args, '-z', 'one-shot: only the final answer reaches stdout');
+  assert.equal(s.args, '-z {prompt}', 'one-shot, with the prompt BOUND to the flag');
   assert.equal(s.promptVia, 'arg');
   assert.equal(s.modelArg, '-m {model}');
   assert.equal(s.label, 'Hermes');
@@ -39,4 +39,25 @@ test('model discovery parses `config get model`, not the interactive picker', as
   assert.ok(!/openrouter|base_url/.test(m[1]), 'the provider lines are not mistaken for models');
   // Never throws when Hermes isn't configured — the picker still takes a typed id.
   assert.ok(Array.isArray(await hermes.listModels({})));
+});
+
+
+test('the prompt is the VALUE of -z, not a trailing positional', () => {
+  // Hermes uses Python argparse: `-z` requires its value immediately. The runner appends a
+  // trailing prompt only when there is no {prompt} placeholder — and it inserts the model
+  // flag first, which produced `hermes -z -m <model> "<prompt>"` and the real error
+  // "argument -z/--oneshot: expected one argument". The placeholder is what prevents it.
+  const spec = hermes.spec;
+  assert.match(spec.args, /\{prompt\}/, 'the placeholder binds the prompt to -z');
+
+  // Reproduce the runner's assembly order: base args → model flag → prompt substitution.
+  let args = String(spec.args).split(/\s+/).filter(Boolean);
+  args = [...args, ...spec.modelArg.replace('{model}', 'some/model').split(' ')];
+  const prompt = 'a prompt with spaces';
+  let placed = false;
+  args = args.map((a) => (a.includes('{prompt}') ? ((placed = true), a.replaceAll('{prompt}', prompt)) : a));
+  if (!placed) args.push(prompt);
+
+  assert.deepEqual(args, ['-z', prompt, '-m', 'some/model']);
+  assert.notEqual(args[1], '-m', 'the flag after -z must never be another flag');
 });

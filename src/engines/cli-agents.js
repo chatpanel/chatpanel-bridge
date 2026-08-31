@@ -264,7 +264,12 @@ export async function listDshModels(command = 'dsh', workingDir) {
 export const hermes = makeCliAgent(
   'hermes',
   {
-    args: '-z',
+    // `-z {prompt}`, NOT a bare `-z`: Hermes takes the prompt as the VALUE of -z (Python
+    // argparse), and the runner appends a trailing prompt only when no {prompt} placeholder
+    // exists — after the model flag. That produced `hermes -z -m <model> "<prompt>"`, where
+    // argparse saw -z followed by another flag: "expected one argument". The placeholder
+    // binds the prompt to the flag, so the model flag can sit anywhere after it.
+    args: '-z {prompt}',
     promptVia: 'arg',
     modelArg: '-m {model}',
     requiresStableMcp: true,
