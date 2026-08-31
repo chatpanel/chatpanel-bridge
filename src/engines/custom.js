@@ -351,6 +351,20 @@ async function runStableMcpSetup(plan, cwd) {
   });
 }
 
+// Turn a browser-tool setup failure into something the user can act on. The CLI's own words
+// are the most accurate signal available, so we forward them — but when they name a missing
+// SDK we say the fix, rather than repeating an `mcp add` that will fail identically.
+export function mcpSetupHint(label, err) {
+  const msg = String(err?.message || err || '');
+  if (/mcp['" ]* Python SDK|No module named ['"]?mcp|MCP support/i.test(msg)) {
+    return `${label} has no MCP support installed. Run \`hermes setup\` (or install the \`mcp\` package in its environment), then retry.`;
+  }
+  if (/streamable_http|HTTP transport/i.test(msg)) {
+    return `${label}'s MCP client has no HTTP transport; ChatPanel registers a stdio server instead. Upgrade its \`mcp\` package if this persists.`;
+  }
+  return msg.slice(0, 200) || 'the CLI could not register the tools';
+}
+
 export async function ensureStableMcpConfig(spec, cwd, label, emit, deps = {}) {
   if (!spec.requiresStableMcp) return true;
   const hasConfig = deps.hasConfig || hasStableMcpConfig;
@@ -474,10 +488,25 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
       : [...tmpl.split(/\s+/).filter(Boolean), cfgFile];
     args = [...tokens, ...args];
   }
-  if (options.mcp?.url) args.push(...mcpTrustArgs(spec, options.mcp));
   // Some CLIs only load MCP from their persistent config, so ensure that stable
   // /mcp endpoint is present before letting the agent answer with no tools.
-  if (options.mcp?.url) await ensureStableMcpConfig(spec, cwd, label, emit);
+  //
+  // DEGRADE, DON'T FAIL. Browser tools are an ENHANCEMENT on top of a CLI that already has
+  // its own; a turn that could have been answered should not die because they couldn't be
+  // registered. (Hermes ships without the `mcp` Python SDK unless `hermes setup` installed
+  // it, so every tool-armed turn failed — and the error told the user to run a command that
+  // fails the same way.) We now say what happened, drop the browser tools, and answer.
+  if (options.mcp?.url) {
+    try {
+      await ensureStableMcpConfig(spec, cwd, label, emit);
+    } catch (e) {
+      emit({ type: 'status', text: `${label}: continuing without ChatPanel's browser tools — ${mcpSetupHint(label, e)}` });
+      options = { ...options, mcp: null };
+    }
+  }
+  // Trust flags only make sense once the server is actually registered — pushing them for
+  // tools we then dropped would widen the CLI's permissions for nothing.
+  if (options.mcp?.url) args.push(...mcpTrustArgs(spec, options.mcp));
 
   // Model via a CONFIG-PATCH FILE, for agents with no --model flag (dsh takes the
   // model as a Cordis config overlay: `--patch <file>` replacing one row by id).

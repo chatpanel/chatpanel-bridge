@@ -71,3 +71,20 @@ test('the prompt is the VALUE of -z, not a trailing positional', () => {
   assert.deepEqual(args, ['-z', prompt, '-m', 'some/model']);
   assert.notEqual(args[1], '-m', 'the flag after -z must never be another flag');
 });
+
+test('a missing MCP SDK degrades the turn instead of killing it', async () => {
+  const { mcpSetupHint } = await import('../src/engines/custom.js');
+  // Hermes ships without the `mcp` Python SDK unless `hermes setup` installed it. The turn
+  // must still answer — browser tools are an enhancement on top of the CLI's own 21 toolsets,
+  // not a precondition — and the message must name the fix that actually works.
+  const hint = mcpSetupHint('Hermes', new Error("requires the 'mcp' Python SDK, but it is not installed"));
+  assert.match(hint, /hermes setup/, 'points at the command that installs MCP support');
+  assert.ok(!/mcp add/.test(hint), 'does not repeat an `mcp add` that fails identically');
+
+  // The HTTP-transport case names the transport, not a reinstall.
+  const http = mcpSetupHint('Hermes', new Error('mcp.client.streamable_http is not available'));
+  assert.match(http, /stdio/, 'explains that a stdio server is registered instead');
+
+  // Anything else forwards the CLI's own words — the most accurate signal available.
+  assert.match(mcpSetupHint('X', new Error('some other failure')), /some other failure/);
+});
