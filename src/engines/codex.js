@@ -151,6 +151,10 @@ export async function chat({ messages, system, options, images }, emit, { signal
     args.push('-s', sandbox, '-c', 'approval_policy=never');
   }
   if (REASONING) args.push('-c', `model_reasoning_effort=${REASONING}`);
+  // Ask Codex to emit reasoning SUMMARIES so the panel can stream the model's thinking.
+  // Additive + safe: a no-op for models/providers that don't produce summaries (e.g. some
+  // hosted models expose none), and cheap at the default effort. forwardEvent renders them.
+  args.push('-c', 'model_reasoning_summary=auto');
   // Browser tools: register the bridge's MCP server as a stdio MCP server (the
   // bridge binary in --mcp-stdio mode), so Codex can call our page-action tools.
   // `-c key=value` parses value as TOML; JSON.stringify yields valid TOML here.
@@ -182,6 +186,9 @@ export async function chat({ messages, system, options, images }, emit, { signal
 
     let stdout = '';
     let stderr = '';
+    // Per-run event state: correlate a command's started/completed events and emit each
+    // reasoning summary once (Codex sends the same item id across item.started/updated/completed).
+    const evState = { started: new Set(), reasoned: new Set(), n: 0 };
     let idleTimer;
     const armIdle = () => {
       clearTimeout(idleTimer);
@@ -201,7 +208,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
         stdout = stdout.slice(nl + 1);
         if (!line.startsWith('{')) continue;
         try {
-          forwardEvent(JSON.parse(line), emit);
+          forwardEvent(JSON.parse(line), emit, evState);
         } catch {
           /* not a JSON event line */
         }
@@ -240,16 +247,58 @@ export async function chat({ messages, system, options, images }, emit, { signal
   });
 }
 
-function forwardEvent(ev, emit) {
+// Translate Codex `exec --json` events into the bridge's streaming vocabulary the panel
+// renders richly. Codex sends item.started (in_progress) then item.completed for each item,
+// reusing the item id — so we correlate a tool's start/done by that id and show its command,
+// its output, and its exit status, the way Codex's own CLI does. Schema (codex-cli 0.15x):
+//   command_execution: { id, command, aggregated_output, exit_code, status }
+//   reasoning:         { id, text }            (only some models/efforts emit it)
+//   file_change:       { id, changes:[{path}] }
+//   agent_message:     { id, text }            (the answer — read from -o outFile at close)
+export function forwardEvent(ev, emit, state = { started: new Set(), reasoned: new Set(), n: 0 }) {
   const t = ev.type || '';
   const item = ev.item || {};
-  if (item.type === 'command_execution' || t.includes('command')) {
-    emit({ type: 'tool', name: 'shell', summary: (item.command || '').slice(0, 60) });
-  } else if (item.type === 'reasoning' || t.includes('reasoning')) {
-    emit({ type: 'reasoning' });
-  } else if (item.type === 'file_change' || t.includes('patch')) {
-    emit({ type: 'tool', name: 'edit', summary: '' });
-  } else if (t === 'turn.started' || t === 'thread.started') {
-    emit({ type: 'status', text: 'Codex working' });
+  const itype = item.type || '';
+  const completed = t === 'item.completed' || item.status === 'completed' || item.status === 'failed';
+
+  if (itype === 'command_execution' || (!itype && t.includes('command'))) {
+    const id = item.id || `cmd_${state.n++}`;
+    if (!state.started.has(id)) {
+      state.started.add(id);
+      emit({ type: 'tool', name: 'shell', phase: 'start', callId: id, input: { command: item.command || '' } });
+    }
+    if (completed) {
+      const ok = item.exit_code === 0 || item.exit_code == null;
+      emit({
+        type: 'tool', name: 'shell', phase: 'done', callId: id,
+        status: ok ? 'ok' : `exit ${item.exit_code}`,
+        result: String(item.aggregated_output || '').slice(0, 4000),
+      });
+    }
+    return;
   }
+
+  if (itype === 'file_change' || (!itype && t.includes('patch'))) {
+    const id = item.id || `edit_${state.n++}`;
+    const files = Array.isArray(item.changes) ? item.changes.map((c) => c.path || c.file).filter(Boolean) : [];
+    if (!state.started.has(id)) {
+      state.started.add(id);
+      emit({ type: 'tool', name: 'edit', phase: 'start', callId: id, input: { files } });
+    }
+    if (completed) emit({ type: 'tool', name: 'edit', phase: 'done', callId: id, status: 'ok' });
+    return;
+  }
+
+  if (itype === 'reasoning' || (!itype && t.includes('reasoning'))) {
+    // Emit each reasoning summary once (dedup the started/updated/completed repeats).
+    const id = item.id || `r_${state.n++}`;
+    const text = item.text || item.summary || '';
+    if (text && !state.reasoned.has(id)) {
+      state.reasoned.add(id);
+      emit({ type: 'reasoning', text: `${text}\n` });
+    }
+    return;
+  }
+
+  if (t === 'turn.started' || t === 'thread.started') emit({ type: 'status', text: 'Codex working' });
 }
