@@ -88,3 +88,20 @@ test('a missing MCP SDK degrades the turn instead of killing it', async () => {
   // Anything else forwards the CLI's own words — the most accurate signal available.
   assert.match(mcpSetupHint('X', new Error('some other failure')), /some other failure/);
 });
+
+test("the CLI's own reason survives into the message the user sees", async () => {
+  const { ensureStableMcpConfig, mcpSetupHint } = await import('../src/engines/custom.js');
+  // `hermes mcp add` exits 0 while registering nothing and explaining why on stdout. If that
+  // output is dropped, the user gets "still not visible — run `mcp add`", which is the
+  // command that just failed. Carrying it through is what makes the hint able to match.
+  let caught;
+  try {
+    await ensureStableMcpConfig(hermes.spec, '/tmp', 'Hermes', () => {}, {
+      hasConfig: async () => false,
+      runSetup: async () => "✗ Failed to connect: requires the 'mcp' Python SDK, but it is not installed.",
+    });
+  } catch (e) { caught = e; }
+  assert.ok(caught, 'setup that registers nothing still raises');
+  assert.match(caught.message, /Python SDK/, "the CLI's explanation is preserved");
+  assert.match(mcpSetupHint('Hermes', caught), /hermes setup/, 'so the hint names the real fix');
+});

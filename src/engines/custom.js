@@ -333,18 +333,23 @@ async function runStableMcpSetup(plan, cwd) {
     let child;
     try { child = spawn(bin, argv, opts); } catch (e) { return reject(new Error(`Failed to start ${plan.command}: ${e.message}`)); }
     let stderr = '';
+    // The CLI often reports WHY it couldn't register on stdout while still exiting 0 (Hermes
+    // prints "requires the 'mcp' Python SDK" and saves nothing). Capturing it is what lets
+    // the caller turn a silent no-op into an actionable message.
+    let stdout = '';
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       reject(new Error(`${plan.command} MCP setup timed out.`));
     }, 20_000);
     child.stderr.on('data', (d) => (stderr += d.toString()));
+    child.stdout?.on('data', (d) => (stdout += d.toString()));
     child.on('error', (e) => {
       clearTimeout(timer);
       reject(new Error(`Failed to start ${plan.command}: ${e.message}`));
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      if (code === 0) return resolve();
+      if (code === 0) return resolve(`${stdout}\n${stderr}`.trim());
       reject(new Error(`${plan.command} MCP setup exited ${code}: ${stderr.trim().split('\n').pop() || 'failed'}`));
     });
     try { child.stdin.end(); } catch { /* ignore */ }
@@ -386,9 +391,15 @@ export async function ensureStableMcpConfig(spec, cwd, label, emit, deps = {}) {
   }
 
   emit({ type: 'status', text: `${label} is setting up one-time browser tools...` });
-  await runSetup(plan, cwd);
+  // Keep what the CLI said: it commonly exits 0 while refusing to register (no MCP SDK, no
+  // HTTP transport), and that sentence is the only accurate explanation available.
+  const setupOutput = String((await runSetup(plan, cwd)) || '').trim();
   if (await hasConfig(spec, cwd)) return true;
-  throw new Error(`${label} browser-tool setup completed, but the MCP server is still not visible. Run: ${setupCommand}`);
+  throw new Error(
+    `${label} browser-tool setup did not register the server.`
+    + (setupOutput ? ` ${setupOutput.split('\n').filter(Boolean).slice(-3).join(' ')}` : '')
+    + ` Run: ${setupCommand}`,
+  );
 }
 
 export async function chat({ messages, system, options, images }, emit, { signal } = {}) {
