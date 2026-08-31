@@ -166,6 +166,18 @@ function runClaude({ prompt, args, cwd, emit, signal }) {
   });
 }
 
+// A tool_result's content is either a string or Anthropic's block array. Flatten to text and
+// cap it: the panel truncates for display anyway, and an un-capped file read would otherwise
+// push megabytes through the SSE for no benefit.
+function toolResultText(content) {
+  let text = '';
+  if (typeof content === 'string') text = content;
+  else if (Array.isArray(content)) {
+    text = content.map((c) => (typeof c === 'string' ? c : (c?.text || ''))).filter(Boolean).join('\n');
+  }
+  return text.length > 4000 ? `${text.slice(0, 4000)}…` : text;
+}
+
 // Map one stream-json message to emit() calls. Returns { streamed, result }.
 // The CLI's stream-json mirrors the SDK message shapes. Exported so the custom
 // engine can reuse it for agents that emit Claude-style stream-json.
@@ -184,11 +196,32 @@ export function handleMessage(msg, emit, alreadyStreamed, cwdForSteps = '') {
   } else if (msg.type === 'assistant') {
     for (const block of msg.message?.content || []) {
       if (block.type === 'tool_use') {
-        emit({ type: 'tool', name: block.name, summary: toolSummary(block, cwdForSteps) });
+        // PHASE-BASED, like the Codex engine: the panel renders a step with the call's
+        // arguments and then fills in its status and output when the result arrives. The old
+        // single `summary` event produced one anonymous line per call and no outcome — you
+        // could see that Claude did something, never what it returned. `summary` is still
+        // sent so an older extension keeps the line it used to draw.
+        emit({
+          type: 'tool', name: block.name, phase: 'start',
+          callId: block.id, input: block.input,
+          summary: toolSummary(block, cwdForSteps),
+        });
       } else if (block.type === 'text' && !alreadyStreamed) {
         out.streamed = true;
         emit({ type: 'delta', text: block.text });
       }
+    }
+  } else if (msg.type === 'user') {
+    // Claude reports every tool's OUTCOME as a tool_result block on a synthetic user message.
+    // Pairing it with the call by tool_use_id is what turns the step list into a readable
+    // log: each action shows ok / error and the text the tool actually returned.
+    for (const block of msg.message?.content || []) {
+      if (block.type !== 'tool_result') continue;
+      emit({
+        type: 'tool', phase: 'done', callId: block.tool_use_id,
+        status: block.is_error ? 'error' : 'ok',
+        result: toolResultText(block.content),
+      });
     }
   } else if (msg.type === 'result') {
     if (msg.subtype === 'success') out.result = msg.result || '';

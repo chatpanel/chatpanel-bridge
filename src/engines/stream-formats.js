@@ -86,8 +86,23 @@ function opencodeJson(emit) {
       streamed = true;
       emit({ type: 'delta', text: ev.part.text });
     } else if (ev.type === 'tool' || ev.type === 'tool_use') {
+      // Phase-based where opencode gives us enough to pair a call with its outcome: its tool
+      // parts carry a callID and a state that moves running → completed/error. Without that we
+      // still emit a start, so the step at least appears (the old behaviour).
       const p = ev.part || {};
-      emit({ type: 'tool', name: p.tool || p.name || p.type || 'tool', summary: '' });
+      const name = p.tool || p.name || p.type || 'tool';
+      const callId = p.callID || p.callId || p.id || undefined;
+      const state = p.state || {};
+      const status = String(state.status || '').toLowerCase();
+      if (status === 'completed' || status === 'error') {
+        emit({
+          type: 'tool', name, phase: 'done', callId,
+          status: status === 'error' ? 'error' : 'ok',
+          result: String(state.output || state.error || '').slice(0, 4000),
+        });
+      } else {
+        emit({ type: 'tool', name, phase: 'start', callId, input: state.input || p.input, summary: '' });
+      }
     } else if (ev.type === 'error') {
       const msg = ev.error?.data?.message || ev.error?.message || ev.error?.name || 'error';
       emit({ type: 'status', text: String(msg).slice(0, 300) });
