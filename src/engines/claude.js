@@ -54,7 +54,9 @@ let cachedOk = false;
 export async function available() {
   // Availability = "can we launch claude somehow" (native / cli.js / WSL / SDK),
   // NOT "does `claude --version` exit 0" (which fails when it just needs login).
-  if (!cachedOk && Date.now() - lastProbe > 4000) {
+  // Re-probe in both directions (see codex.js): caching success forever meant an uninstalled
+  // CLI still reported itself available.
+  if (Date.now() - lastProbe > (cachedOk ? 30_000 : 4000)) {
     lastProbe = Date.now();
     try {
       const spec = resolveClaude();

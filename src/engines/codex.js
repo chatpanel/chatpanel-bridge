@@ -77,10 +77,10 @@ function ensureIsolatedHome() {
 let installed = false;
 let lastProbe = 0;
 export async function available() {
-  // Availability = "is codex findable on PATH", not "does `codex --version` exit
-  // 0" (which fails when the CLI just needs login). Cache positives; re-probe
-  // (throttled) while not found so it self-heals once codex appears on PATH.
-  if (!installed && Date.now() - lastProbe > 4000) {
+  // Availability = "is codex findable on PATH", not "does `codex --version` exit 0" (which
+  // fails when the CLI just needs login). Re-probed in BOTH directions: caching a positive
+  // forever kept an uninstalled CLI reporting itself available until the bridge restarted.
+  if (Date.now() - lastProbe > (installed ? 30_000 : 4000)) {
     lastProbe = Date.now();
     try {
       installed = !!findAgentBin('codex');

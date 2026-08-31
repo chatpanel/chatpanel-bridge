@@ -50,7 +50,9 @@ let lastProbe = 0;
 export async function available() {
   // Cache a positive result; keep re-probing (throttled) while not found so it
   // self-heals once agy appears on PATH — never cache a negative forever.
-  if (!installed && Date.now() - lastProbe > 4000) {
+  // Re-probe in both directions (see codex.js): an uninstalled CLI must stop reporting itself
+  // available without waiting for a bridge restart.
+  if (Date.now() - lastProbe > (installed ? 30_000 : 4000)) {
     lastProbe = Date.now();
     try {
       installed = !!findAgentBin('agy');

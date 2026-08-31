@@ -21,9 +21,13 @@ function makeCliAgent(command, spec, notFoundHint, overrides = {}) {
   return {
     spec: resolvedSpec,
     async available() {
-      // Cache a positive result; re-probe (throttled) while not found so it
-      // self-heals once the CLI appears on PATH.
-      if (!installed && Date.now() - lastProbe > 4000) {
+      // Re-probe in BOTH directions. Caching a positive result forever meant an UNINSTALLED
+      // CLI kept reporting itself available until the bridge restarted — the picker showed a
+      // green dot for an agent that could no longer run, and the turn failed with "couldn't
+      // find it on your PATH". A found CLI is re-checked on a slow interval (it rarely
+      // disappears, and `which` is cheap but not free); a missing one keeps the fast interval
+      // so it still self-heals the moment it is installed.
+      if (Date.now() - lastProbe > (installed ? 30_000 : 4000)) {
         lastProbe = Date.now();
         try {
           installed = !!findAgentBin(command);
