@@ -33,7 +33,7 @@ import { join } from 'node:path';
 import * as claude from './engines/claude.js';
 import * as codex from './engines/codex.js';
 import * as antigravity from './engines/antigravity.js';
-import { pi, opencode, kiro, copilot, deepseek } from './engines/cli-agents.js';
+import { pi, opencode, kiro, copilot, deepseek , hermes } from './engines/cli-agents.js';
 import { connectorsFor } from './connectors.js';
 import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
@@ -67,7 +67,7 @@ import {
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.34';
+const VERSION = '0.10.35';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -77,6 +77,7 @@ const ENGINES = {
   antigravity: { engine: antigravity, label: 'Antigravity' },
   pi: { engine: pi, label: 'Pi' },
   opencode: { engine: opencode, label: 'OpenCode' },
+  hermes: { engine: hermes, label: 'Hermes' },
   kiro: { engine: kiro, label: 'Kiro' },
   copilot: { engine: copilot, label: 'GitHub Copilot' },
   deepseek: { engine: deepseek, label: 'DeepSeek Harness' },

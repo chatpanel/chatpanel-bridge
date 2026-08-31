@@ -307,9 +307,17 @@ async function kiroHasStableMcpConfig(command, cwd) {
   return false;
 }
 
+// Hermes keeps MCP servers in its own config; `hermes mcp list` is the one honest way to ask
+// whether ours is already registered (no scopes, unlike kiro).
+async function hermesHasStableMcpConfig(command, cwd) {
+  const out = await commandOutput(command, ['mcp', 'list'], cwd);
+  return out.includes(CHATPANEL_STABLE_MCP_URL) || /chatpanel_browser/i.test(out);
+}
+
 async function hasStableMcpConfig(spec, cwd) {
   if (spec.stableMcpConfigCheck === 'kiro') return kiroHasStableMcpConfig(spec.command || 'kiro-cli', cwd);
   if (spec.stableMcpConfigCheck === 'opencode') return opencodeHasStableMcpConfig();
+  if (spec.stableMcpConfigCheck === 'hermes') return hermesHasStableMcpConfig(spec.command || 'hermes', cwd);
   return false;
 }
 

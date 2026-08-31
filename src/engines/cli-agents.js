@@ -6,6 +6,7 @@
 //   pi       — pi -p "<prompt>"        · --model · @{path} images · --list-models
 //   opencode — opencode run "<prompt>" · -m provider/model · -f {path} images · models
 //   kiro     — kiro-cli chat --no-interactive "<prompt>" · --model · --list-models
+//   hermes   — hermes -z "<prompt>"      · -m model · config get model (no list command)
 
 import { runSpec, listSpecModels, runForStdout } from './custom.js';
 import { findAgentBin } from '../env.js';
@@ -248,3 +249,43 @@ export async function listDshModels(command = 'dsh', workingDir) {
   }
   return [...DSH_KNOWN_MODELS];
 }
+
+// Hermes Agent (Nous Research). `-z/--oneshot` prints ONLY the final response text — no
+// banner, no spinner, no tool previews — which is exactly the contract the shared runner
+// wants, and it auto-bypasses approvals so a headless turn never blocks on a prompt.
+//
+// Its own tools and skills (82 of them here) stay ACTIVE: Hermes loads them itself, and the
+// bridge's browser tools arrive over the stable /mcp endpoint like opencode and kiro, since
+// Hermes only reads MCP servers from its own config rather than a per-run file.
+//
+// `hermes model` is interactive with no --list flag, so model discovery goes through
+// `hermes config get model`, which prints the resolved default + provider as `key: value`
+// lines. That yields the one model the user has actually configured — honest, if short.
+export const hermes = makeCliAgent(
+  'hermes',
+  {
+    args: '-z',
+    promptVia: 'arg',
+    modelArg: '-m {model}',
+    requiresStableMcp: true,
+    autoSetupStableMcp: true,
+    stableMcpConfigCheck: 'hermes',
+    stableMcpSetupArgs: ['mcp', 'add', 'chatpanel_browser', '--url', 'http://127.0.0.1:4319/mcp'],
+    stableMcpSetupCommand: 'hermes mcp add chatpanel_browser --url http://127.0.0.1:4319/mcp',
+    label: 'Hermes',
+  },
+  'hermes not found on PATH. Install Hermes Agent, then run `hermes setup` to sign in.',
+  {
+    // `config get model` prints resolved settings as `key: value`; we want the default model
+    // id, not the provider or base_url lines around it.
+    listModels: async (command, options = {}) => {
+      try {
+        const out = await runForStdout(command, ['config', 'get', 'model'], options.workingDir);
+        const m = /^\s*default:\s*(\S+)/m.exec(out || '');
+        return m ? [m[1]] : [];
+      } catch {
+        return []; // not configured yet — the picker still accepts a typed id
+      }
+    },
+  },
+);
