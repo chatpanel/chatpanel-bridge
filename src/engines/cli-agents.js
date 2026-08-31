@@ -8,8 +8,8 @@
 //   kiro     — kiro-cli chat --no-interactive "<prompt>" · --model · --list-models
 //   hermes   — hermes -z "<prompt>"      · -m model · config get model (no list command)
 
-import { runSpec, listSpecModels, runForStdout } from './custom.js';
-import { findAgentBin } from '../env.js';
+import { runSpec, listSpecModels, runForStdout, CHATPANEL_STABLE_MCP_URL } from './custom.js';
+import { findAgentBin, selfMcpStdio } from '../env.js';
 
 // `listModels` override hook: a CLI whose model listing isn't "one id per line"
 // (Copilot prints a quoted list inside `help config`) passes its own parser here
@@ -275,8 +275,20 @@ export const hermes = makeCliAgent(
     requiresStableMcp: true,
     autoSetupStableMcp: true,
     stableMcpConfigCheck: 'hermes',
-    stableMcpSetupArgs: ['mcp', 'add', 'chatpanel_browser', '--url', 'http://127.0.0.1:4319/mcp'],
-    stableMcpSetupCommand: 'hermes mcp add chatpanel_browser --url http://127.0.0.1:4319/mcp',
+    // STDIO, not --url. Hermes's bundled MCP client has no HTTP transport ("requires HTTP
+    // transport but mcp.client.streamable_http is not available"), so a URL registration
+    // saves a config that can never connect. The bridge also speaks MCP over stdio — the
+    // same mode Codex uses — so we register that instead. A function because the executable
+    // is only known at runtime (a compiled binary runs itself; under node it re-runs its
+    // entry script). `--args` must come last, per `hermes mcp add`.
+    stableMcpSetupArgs: () => {
+      const { command, args } = selfMcpStdio(CHATPANEL_STABLE_MCP_URL);
+      return ['mcp', 'add', 'chatpanel_browser', '--command', command, '--args', ...args];
+    },
+    stableMcpSetupCommand: (() => {
+      const { command, args } = selfMcpStdio(CHATPANEL_STABLE_MCP_URL);
+      return `hermes mcp add chatpanel_browser --command ${command} --args ${args.join(' ')}`;
+    })(),
     label: 'Hermes',
   },
   'hermes not found on PATH. Install Hermes Agent, then run `hermes setup` to sign in.',

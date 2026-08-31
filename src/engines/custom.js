@@ -64,7 +64,7 @@ const IDLE_MS = Number(process.env.CHATPANEL_CUSTOM_TIMEOUT_MS) || 180_000;
 // ANSI stripping moved to stream-formats.js (imported above), which is where
 // text output is actually rendered - one implementation for every format.
 const OPENCODE_STABLE_MCP_URL = 'http://127.0.0.1:4319/mcp';
-const CHATPANEL_STABLE_MCP_URL = 'http://127.0.0.1:4319/mcp';
+export const CHATPANEL_STABLE_MCP_URL = 'http://127.0.0.1:4319/mcp';
 
 export async function available() {
   // The engine ships in every bridge; individual custom agents are user-defined
@@ -167,7 +167,10 @@ export function stableMcpSetupCommand(spec = {}) {
 }
 
 export function stableMcpSetupPlan(spec = {}) {
-  const args = Array.isArray(spec.stableMcpSetupArgs) ? spec.stableMcpSetupArgs.filter((a) => a != null).map(String) : null;
+  // A FUNCTION is allowed as well as an array: a stdio registration has to name the bridge's
+  // own executable, which is only known at runtime (compiled binary vs. node + entry script).
+  const raw = typeof spec.stableMcpSetupArgs === 'function' ? spec.stableMcpSetupArgs() : spec.stableMcpSetupArgs;
+  const args = Array.isArray(raw) ? raw.filter((a) => a != null).map(String) : null;
   if (!args?.length) return null;
   return { command: spec.stableMcpSetupCommandName || spec.command, args };
 }

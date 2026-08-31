@@ -6,6 +6,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { hermes } from '../src/engines/cli-agents.js';
+import { stableMcpSetupPlan } from '../src/engines/custom.js';
 
 test('the spec matches the CLI contract', () => {
   const s = hermes.spec;
@@ -16,12 +17,21 @@ test('the spec matches the CLI contract', () => {
   assert.equal(s.label, 'Hermes');
 });
 
-test('browser tools go through the stable /mcp endpoint, like opencode and kiro', () => {
+test('browser tools register over STDIO — Hermes has no HTTP MCP transport', () => {
   const s = hermes.spec;
   assert.equal(s.requiresStableMcp, true, 'Hermes reads MCP only from its own config');
   assert.equal(s.autoSetupStableMcp, true);
   assert.equal(s.stableMcpConfigCheck, 'hermes');
-  assert.deepEqual(s.stableMcpSetupArgs, ['mcp', 'add', 'chatpanel_browser', '--url', 'http://127.0.0.1:4319/mcp']);
+
+  // A --url registration saves a config that can never connect: Hermes's bundled MCP client
+  // reports "requires HTTP transport but mcp.client.streamable_http is not available". The
+  // bridge also speaks MCP over stdio (the mode Codex uses), so we register that.
+  const plan = stableMcpSetupPlan(s);
+  assert.equal(plan.command, 'hermes');
+  assert.ok(plan.args.includes('--command'), 'registers a stdio command');
+  assert.ok(plan.args.includes('--mcp-stdio'), 'pointing at the bridge stdio MCP mode');
+  assert.ok(!plan.args.includes('--url'), 'never the HTTP transport Hermes cannot use');
+  assert.equal(plan.args[plan.args.length - 4], '--args', '`--args` is last, as hermes mcp add requires');
 });
 
 test('availability reports a fixable reason when the CLI is absent', async () => {
