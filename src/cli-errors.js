@@ -7,6 +7,10 @@
 //
 // The failure is also usually not ChatPanel's to fix. Saying whose it is, and naming the
 // server, is the difference between "something broke" and "re-auth that server".
+//
+// `mcpFailure` is the machine-readable half of the same knowledge: mcp-quarantine.js reads
+// it to DROP the offending server and run again, so the common cases never reach a human at
+// all. One set of patterns serves both — a second copy would drift.
 
 const NOISE = [
   /^\s*$/,
@@ -27,19 +31,79 @@ export function stripMarkup(text) {
     .replace(/[ \t]+/g, ' ');
 }
 
+// Which server the output blames, if it names one. Codex and Claude Code phrase this several
+// ways, so try each; a name we cannot read means there is nothing to disable, which is why
+// every caller must tolerate `null`.
+const SERVER_PATTERNS = [
+  /(?:refresh OAuth tokens|refresh tools) for (?:MCP )?server ['"`]?([\w.-]+)['"`]?/i,
+  /MCP server ['"`]([\w.-]+)['"`]/i,
+  /server ['"]?([\w.-]+)['"]? (?:requires|failed) auth/i,
+];
+export function mcpServerName(text) {
+  for (const re of SERVER_PATTERNS) {
+    const name = re.exec(String(text || ''))?.[1];
+    if (name) return name;
+  }
+  return null;
+}
+
+// The named MCP causes worth translating. `say` is the sentence for a human; `short` is the
+// clause used when we skip the server and carry on. Order matters — specific before generic.
+const MCP_CAUSES = [
+  {
+    kind: 'expired',
+    test: /refresh token (?:does not exist|was rejected)|invalid_grant/i,
+    short: 'its saved login has expired',
+    say: (who) => `${who} needs re-authentication — its saved OAuth token has expired or been revoked. Re-login to that server in the agent's own config; ChatPanel can't refresh it.`,
+  },
+  {
+    kind: 'unauthorized',
+    test: /invalid_token|AuthRequired|www-authenticate|\b401\b/i,
+    short: 'it rejected the agent\'s token',
+    say: (who) => `${who} rejected the agent's token (401/invalid_token). Re-authenticate that server in the agent, then retry.`,
+  },
+  {
+    kind: 'refused',
+    test: /HTTP 403|\b403\b/,
+    short: 'it is refusing requests',
+    say: (who) => `${who} returned 403 and an error page — that server is refusing requests or is temporarily down. This is outside ChatPanel; retry when it recovers.`,
+  },
+  {
+    // The off-network case: a VPN-only server seen from a cafe. Only counted when the text
+    // is talking about MCP at all, so an ordinary provider timeout is not misread as this.
+    kind: 'unreachable',
+    requiresMcpContext: true,
+    test: /handshaking with MCP server failed|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|dns error|connection (?:refused|reset)|failed to start and is unavailable|network is unreachable/i,
+    short: 'it could not be reached',
+    say: (who) => `${who} could not be reached — it is offline, or needs a network (VPN) this machine is not on. ChatPanel can't reach it either; retry when it is available.`,
+  },
+];
+
+/**
+ * Classify an MCP-server failure in an agent's output.
+ * @returns {{server: string|null, kind: string, short: string, say: string}|null}
+ */
+export function mcpFailure(text) {
+  const raw = String(text || '');
+  const server = mcpServerName(raw);
+  const hasMcpContext = /\bmcp\b/i.test(raw) || !!server;
+  for (const cause of MCP_CAUSES) {
+    if (cause.requiresMcpContext && !hasMcpContext) continue;
+    if (!cause.test.test(raw)) continue;
+    return {
+      server,
+      kind: cause.kind,
+      short: cause.short,
+      say: cause.say(server ? `its MCP server "${server}"` : 'one of its MCP servers'),
+    };
+  }
+  return null;
+}
+
 // The named causes worth translating. Each returns a sentence that says what to DO.
 function knownCause(text) {
-  const server = /refresh OAuth tokens for server ([\w.-]+)/i.exec(text)?.[1]
-    || /server ['"]?([\w.-]+)['"]? (?:requires|failed) auth/i.exec(text)?.[1];
-  if (/refresh token (?:does not exist|was rejected)|invalid_grant/i.test(text)) {
-    return `${server ? `its MCP server "${server}"` : 'one of its MCP servers'} needs re-authentication — its saved OAuth token has expired or been revoked. Re-login to that server in the agent's own config; ChatPanel can't refresh it.`;
-  }
-  if (/invalid_token|AuthRequired|www-authenticate|\b401\b/i.test(text)) {
-    return `${server ? `its MCP server "${server}"` : 'one of its MCP servers'} rejected the agent's token (401/invalid_token). Re-authenticate that server in the agent, then retry.`;
-  }
-  if (/HTTP 403|\b403\b/.test(text)) {
-    return `${server ? `its MCP server "${server}"` : 'one of its MCP servers'} returned 403 and an error page — that server is refusing requests or is temporarily down. This is outside ChatPanel; retry when it recovers.`;
-  }
+  const mcp = mcpFailure(text);
+  if (mcp) return mcp.say;
   if (/ENOENT|command not found/i.test(text)) return 'the command could not be found on PATH.';
   return null;
 }

@@ -25,6 +25,7 @@ import { buildCliPrompt } from './prompt.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
 import { resolveWorkdir } from '../workdir.js';
 import { summarizeCliError } from '../cli-errors.js';
+import { disabledMcpServers, planMcpRetry, quarantine } from '../mcp-quarantine.js';
 
 // Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
 // streaming never trips it — only true silence does. Override with
@@ -117,6 +118,40 @@ export function codexMcpConfigArgs(mcp) {
   return args;
 }
 
+// Which MCP servers this Codex actually has configured.
+//
+// READ THIS BEFORE TOUCHING codexDisableArgs. `-c mcp_servers.X.enabled=false` for a name
+// that is NOT already in config.toml does not disable anything — it DEFINES a new server
+// that has no transport, and Codex then refuses to start at all:
+//     Error: failed to load bootstrap configuration
+//     Caused by: invalid transport in `mcp_servers.does_not_exist`
+// So a stale quarantine entry, or a typo in the user's deny list, would break EVERY run —
+// strictly worse than the failure this feature exists to fix. We therefore only ever disable
+// a server we can see, and a name we cannot see is left alone (a no-op, never a break).
+//
+// Read from config.toml — instant, and the same source listModels() already reads — rather
+// than shelling out to `codex mcp list --json`, which is authoritative but costs ~0.8s on
+// every single turn.
+export function configuredMcpServers(home) {
+  try {
+    const cfg = readFileSync(path.join(home, 'config.toml'), 'utf8');
+    const names = new Set();
+    for (const m of cfg.matchAll(/^\s*\[mcp_servers\.([A-Za-z0-9_-]+)\s*[.\]]/gm)) names.add(m[1]);
+    return names;
+  } catch {
+    return new Set(); // no config (or the isolated home) — there is nothing to disable
+  }
+}
+
+// Turn off servers from the user's own config.toml for THIS RUN only — never by editing
+// their file. Names are validated upstream (mcp-quarantine.js) and filtered against
+// configuredMcpServers by the caller, which is what makes it safe to interpolate one into a
+// `-c` override key; `-c` is otherwise blocked in extraArgs precisely because it reaches
+// config that matters.
+export function codexDisableArgs(names = []) {
+  return names.flatMap((name) => ['-c', `mcp_servers.${name}.enabled=false`]);
+}
+
 // Write base64 data-URL images to temp files so `codex exec -i <file>` can
 // attach them to the prompt as vision input. Returns the paths (caller cleans up).
 async function writeImages(images, tag) {
@@ -132,54 +167,15 @@ async function writeImages(images, tag) {
   return files;
 }
 
-export async function chat({ messages, system, options, images }, emit, { signal } = {}) {
-  const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  const outFile = path.join(os.tmpdir(), `chatpanel-codex-${tag}.txt`);
-  const imageFiles = await writeImages(images, tag);
-  const cleanupImages = () => imageFiles.forEach((f) => unlink(f).catch(() => {}));
-
-  const cwd = resolveWorkdir(options.workingDir);
-  const args = ['exec', '--json', '--skip-git-repo-check', '-o', outFile];
-  // Headless exec has no human to approve actions. With MCP/browser tools armed
-  // Codex would otherwise raise an approval prompt it can't show — and cancel the
-  // tool call. So in bypassPermissions (full autonomy, what "Act on page" needs)
-  // use the all-in bypass flag, which also clears MCP-tool approval. Lower modes
-  // keep the sandbox + never-ask, which auto-runs within bounds.
-  if (options.permissionMode === 'bypassPermissions') {
-    args.push('--dangerously-bypass-approvals-and-sandbox');
-  } else {
-    const sandbox = options.permissionMode === 'acceptEdits' ? 'workspace-write' : 'read-only';
-    args.push('-s', sandbox, '-c', 'approval_policy=never');
-  }
-  if (REASONING) args.push('-c', `model_reasoning_effort=${REASONING}`);
-  // Ask Codex to emit reasoning SUMMARIES so the panel can stream the model's thinking.
-  // Additive + safe: a no-op for models/providers that don't produce summaries (e.g. some
-  // hosted models expose none), and cheap at the default effort. forwardEvent renders them.
-  args.push('-c', 'model_reasoning_summary=auto');
-  // Browser tools: register the bridge's MCP server as a stdio MCP server (the
-  // bridge binary in --mcp-stdio mode), so Codex can call our page-action tools.
-  // `-c key=value` parses value as TOML; JSON.stringify yields valid TOML here.
-  args.push(...codexMcpConfigArgs(options.mcp));
-  if (options.model) args.push('-m', options.model);
-  // Drop caller extras that would re-open the sandbox/approval boundary (shared sanitizer).
-  pushExtraArgs(args, options.extraArgs, FORBIDDEN.codex, emit);
-  for (const f of imageFiles) args.push('-i', f); // attach images to the initial prompt
-  args.push('-');
-
-  // Default: use the user's skills/config. Opt-out → isolated home.
-  const useLocal = options.useLocalConfig !== false;
-  const env = { ...process.env };
-  if (!useLocal) {
-    const home = ensureIsolatedHome();
-    if (home) env.CODEX_HOME = home;
-  }
-
-  await new Promise((resolve, reject) => {
+// A single `codex exec` attempt. Resolves with how it ended rather than emitting the final
+// message itself, so the caller can decide whether the run is worth ATTEMPTING AGAIN — the
+// terminal delta/done belongs to whichever attempt actually answered.
+function runCodex({ args, cwd, env, prompt, outFile, emit, signal }) {
+  return new Promise((resolve, reject) => {
     let child;
     try {
       child = spawn('codex', args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], env, ...spawnGroupOpts });
     } catch (e) {
-      cleanupImages();
       return reject(new Error(`Failed to start codex: ${e.message}`));
     }
 
@@ -187,6 +183,13 @@ export async function chat({ messages, system, options, images }, emit, { signal
 
     let stdout = '';
     let stderr = '';
+    // Retrying is only honest while nothing the user can see has been produced. Status lines
+    // are ours and are replaceable; a delta, a tool call or a reasoning summary is not.
+    let streamed = false;
+    const relay = (ev) => {
+      if (ev?.type !== 'status') streamed = true;
+      emit(ev);
+    };
     // Per-run event state: correlate a command's started/completed events and emit each
     // reasoning summary once (Codex sends the same item id across item.started/updated/completed).
     const evState = { started: new Set(), reasoned: new Set(), n: 0 };
@@ -209,7 +212,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
         stdout = stdout.slice(nl + 1);
         if (!line.startsWith('{')) continue;
         try {
-          forwardEvent(JSON.parse(line), emit, evState);
+          forwardEvent(JSON.parse(line), relay, evState);
         } catch {
           /* not a JSON event line */
         }
@@ -219,7 +222,6 @@ export async function chat({ messages, system, options, images }, emit, { signal
     child.on('error', (e) => {
       clearTimeout(idleTimer);
       detach();
-      cleanupImages();
       reject(e);
     });
     child.on('close', async (code) => {
@@ -232,20 +234,96 @@ export async function chat({ messages, system, options, images }, emit, { signal
         /* no message file */
       }
       unlink(outFile).catch(() => {});
-      cleanupImages();
-      if (signal?.aborted) { resolve(); return; } // Stop pressed — end quietly, no error
-      if (code === 0) {
-        emit({ type: 'delta', text: text || '(no output)' });
-        emit({ type: 'done', text: '' });
-        resolve();
-      } else {
-        reject(new Error(summarizeCliError('Codex', code, stderr)));
-      }
+      resolve({ code, stderr, text, streamed });
     });
 
-    child.stdin.write(buildCliPrompt(messages, system));
+    child.stdin.write(prompt);
     child.stdin.end();
   });
+}
+
+export async function chat({ messages, system, options, images }, emit, { signal } = {}) {
+  const tag = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const outFile = path.join(os.tmpdir(), `chatpanel-codex-${tag}.txt`);
+  const imageFiles = await writeImages(images, tag);
+  const cleanupImages = () => imageFiles.forEach((f) => unlink(f).catch(() => {}));
+
+  const cwd = resolveWorkdir(options.workingDir);
+  // Sanitized once, not per attempt — pushExtraArgs emits a status when it drops something,
+  // and a retry must not say it twice.
+  const extraArgs = [];
+  pushExtraArgs(extraArgs, options.extraArgs, FORBIDDEN.codex, emit);
+
+  const buildArgs = (disabled) => {
+    const args = ['exec', '--json', '--skip-git-repo-check', '-o', outFile];
+    // Headless exec has no human to approve actions. With MCP/browser tools armed
+    // Codex would otherwise raise an approval prompt it can't show — and cancel the
+    // tool call. So in bypassPermissions (full autonomy, what "Act on page" needs)
+    // use the all-in bypass flag, which also clears MCP-tool approval. Lower modes
+    // keep the sandbox + never-ask, which auto-runs within bounds.
+    if (options.permissionMode === 'bypassPermissions') {
+      args.push('--dangerously-bypass-approvals-and-sandbox');
+    } else {
+      const sandbox = options.permissionMode === 'acceptEdits' ? 'workspace-write' : 'read-only';
+      args.push('-s', sandbox, '-c', 'approval_policy=never');
+    }
+    if (REASONING) args.push('-c', `model_reasoning_effort=${REASONING}`);
+    // Ask Codex to emit reasoning SUMMARIES so the panel can stream the model's thinking.
+    // Additive + safe: a no-op for models/providers that don't produce summaries (e.g. some
+    // hosted models expose none), and cheap at the default effort. forwardEvent renders them.
+    args.push('-c', 'model_reasoning_summary=auto');
+    // Browser tools: register the bridge's MCP server as a stdio MCP server (the
+    // bridge binary in --mcp-stdio mode), so Codex can call our page-action tools.
+    // `-c key=value` parses value as TOML; JSON.stringify yields valid TOML here.
+    args.push(...codexMcpConfigArgs(options.mcp));
+    // ...and the other direction: the user's own servers we've been told to leave out.
+    args.push(...codexDisableArgs(disabled));
+    if (options.model) args.push('-m', options.model);
+    // Drop caller extras that would re-open the sandbox/approval boundary (shared sanitizer).
+    args.push(...extraArgs);
+    for (const f of imageFiles) args.push('-i', f); // attach images to the initial prompt
+    args.push('-');
+    return args;
+  };
+
+  // Default: use the user's skills/config. Opt-out → isolated home.
+  const useLocal = options.useLocalConfig !== false;
+  const env = { ...process.env };
+  if (!useLocal) {
+    const home = ensureIsolatedHome();
+    if (home) env.CODEX_HOME = home;
+  }
+
+  const ownServer = options.mcp?.serverName || 'chatpanel_browser';
+  // Only servers Codex already knows about can be switched off — see configuredMcpServers.
+  const known = configuredMcpServers(env.CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), '.codex'));
+  let disabled = disabledMcpServers('codex', options, [ownServer]).filter((n) => known.has(n));
+  const prompt = buildCliPrompt(messages, system);
+  const attempt = () => runCodex({ args: buildArgs(disabled), cwd, env, prompt, outFile, emit, signal });
+
+  try {
+    let result = await attempt();
+
+    // The failure this exists for: one of the user's OWN MCP servers could not authenticate
+    // or could not be reached, and took a turn with it that never needed that server. Drop it
+    // and run again — once, out loud, and only while nothing has been streamed.
+    if (!signal?.aborted && result.code !== 0 && !result.streamed) {
+      const drop = planMcpRetry({ agent: 'codex', text: result.stderr, protect: [ownServer], already: disabled });
+      if (drop && known.has(drop.server)) {
+        quarantine('codex', drop.server);
+        emit({ type: 'status', text: `MCP server "${drop.server}" failed to load — ${drop.short}. Skipping it and retrying.` });
+        disabled = [...disabled, drop.server];
+        result = await attempt();
+      }
+    }
+
+    if (signal?.aborted) return; // Stop pressed — end quietly, no error
+    if (result.code !== 0) throw new Error(summarizeCliError('Codex', result.code, result.stderr));
+    emit({ type: 'delta', text: result.text || '(no output)' });
+    emit({ type: 'done', text: '' });
+  } finally {
+    cleanupImages();
+  }
 }
 
 // Translate Codex `exec --json` events into the bridge's streaming vocabulary the panel

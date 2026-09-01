@@ -6,6 +6,7 @@
 // are rejected when accepting them would produce misleading behavior.
 
 import { randomUUID } from 'node:crypto';
+import { normalizeNames } from './mcp-quarantine.js';
 
 const AGENT_IDS = new Set(['claude', 'codex', 'antigravity', 'pi', 'opencode', 'kiro', 'copilot', 'deepseek']);
 
@@ -76,6 +77,9 @@ function resolveTarget(model, chatpanel = {}) {
       workingDir: chatpanel.working_dir || chatpanel.workingDir || process.env.CHATPANEL_API_WORKING_DIR || '',
       permissionMode,
       useLocalConfig: chatpanel.use_local_config ?? chatpanel.useLocalConfig ?? true,
+      // Servers in the agent's OWN MCP config to leave out of this run — one that can't
+      // authenticate or can't be reached otherwise kills the whole turn (see mcp-quarantine.js).
+      mcpDisabled: normalizeNames(chatpanel.mcp_disabled ?? chatpanel.mcpDisabled),
       ...(engineModel ? { model: engineModel } : {}),
     },
   };
