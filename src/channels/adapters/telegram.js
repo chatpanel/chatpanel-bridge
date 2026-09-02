@@ -52,6 +52,7 @@ export function startTelegram({
   // which it has: both expose chat()/cancel() and fold into one reply state.
   transport = bridge,
   model = '',
+  provider = '',
   system = '',
   redact = { tier: 'basic' },
   privacy = 'standard',
@@ -158,7 +159,7 @@ export function startTelegram({
 
     try {
       const finalState = await transport.chat(
-        { agent, model, system, messages, images, options: { reach } },
+        { agent, model, provider, system, messages, images, options: { reach } },
         {
           baseUrl, token, signal,
           onEvent: (ev, state) => {

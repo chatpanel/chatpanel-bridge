@@ -40,7 +40,7 @@ const inflight = new Map();
  * not know which transport it has: streams events to onEvent(ev, state) and returns the folded
  * final state.
  */
-export async function chat({ model = '', system = '', messages = [], options = {} }, {
+export async function chat({ model = '', provider = '', system = '', messages = [], options = {} }, {
   baseUrl, signal, onEvent = () => {},
 } = {}) {
   const runId = `gw_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
@@ -57,7 +57,18 @@ export async function chat({ model = '', system = '', messages = [], options = {
   try {
     const res = await fetch(`${String(baseUrl).replace(/\/$/, '')}/v1/chat/completions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: {
+        'content-type': 'application/json',
+        // ChatPanel's routing metadata goes in HEADERS, never in the request body. It rode the
+        // body first and NVIDIA answered "unsupported parameters": OpenAI-compatible providers
+        // validate the body strictly and reject unknown fields, while ignoring unknown headers.
+        // The gateway strips x-chatpanel-* before forwarding, so the provider never sees it.
+        ...(options?.reach ? { 'x-chatpanel-reach': options.reach } : {}),
+        // WHICH provider, not just which model. A model id is not a unique key — two providers
+        // can serve the same one — so without this the gateway picks whichever destination it
+        // lists first and the call goes out on a key the user never chose.
+        ...(provider ? { 'x-chatpanel-destination': provider } : {}),
+      },
       body: JSON.stringify({
         model,
         stream: true,
@@ -65,9 +76,6 @@ export async function chat({ model = '', system = '', messages = [], options = {
           ...(system ? [{ role: 'system', content: system }] : []),
           ...messages.map((m) => ({ role: m.role, content: String(m.content ?? '') })),
         ],
-        // Carried through so a capped phone's reach still reaches the router. The gateway
-        // ignores what it does not know, which is what keeps an older gateway working.
-        ...(options?.reach ? { chatpanel: { reach: options.reach } } : {}),
       }),
       signal: ac.signal,
     });

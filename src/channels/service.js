@@ -41,7 +41,8 @@ const TELEGRAM_API = 'https://api.telegram.org';
 // its own bridge backend, the same agents. They are mutually exclusive: update() clears one
 // when the other is set, because "which thing answers" is one choice, not two.
 export const DEFAULT_SETTINGS = Object.freeze({
-  agent: 'claude', model: '', gatewayUrl: DEFAULT_GATEWAY_URL, privacy: 'standard', tier: 'basic',
+  agent: 'claude', model: '', provider: '', gatewayUrl: DEFAULT_GATEWAY_URL,
+  privacy: 'standard', tier: 'basic',
 });
 
 // Restart backoff. A long-poll that dies (network drop, laptop asleep, Telegram hiccup) must
@@ -137,6 +138,7 @@ export function createChannelService({
       botToken,
       transport: viaGateway ? gateway : bridgeTransport,
       model: viaGateway ? settings.model : '',
+      provider: viaGateway ? (settings.provider || '') : '',
       baseUrl: viaGateway ? (settings.gatewayUrl || DEFAULT_GATEWAY_URL) : bridge.baseUrl,
       token: bridge.token,
       pairing,
@@ -247,12 +249,12 @@ export function createChannelService({
     async update(patch = {}) {
       await load();
       const next = { ...settings };
-          for (const k of ['agent', 'model', 'gatewayUrl', 'privacy', 'tier', 'system']) {
+          for (const k of ['agent', 'model', 'provider', 'gatewayUrl', 'privacy', 'tier', 'system']) {
         if (patch[k] != null) next[k] = patch[k];
       }
       // Picking one target unpicks the other. Without this a stale `model` would silently win
       // over the agent the user just chose, and the screen would disagree with the machine.
-      if (patch.agent != null && patch.model == null) next.model = '';
+      if (patch.agent != null && patch.model == null) { next.model = ''; next.provider = ''; }
       if (patch.model) next.agent = '';
       settings = next;
       await saveSettings();
@@ -297,6 +299,7 @@ export function createChannelService({
         settings: {
           agent: settings.agent,
           model: settings.model || '',
+          provider: settings.provider || '',
           gatewayUrl: settings.gatewayUrl || DEFAULT_GATEWAY_URL,
           privacy: settings.privacy,
           tier: settings.tier,
