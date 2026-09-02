@@ -68,12 +68,15 @@ export function createChannelService({
   logger = console,
   fetchImpl = undefined,         // injected in tests
   now = () => Date.now(),
+  // The adapter is injectable for the same reason fetchImpl is: the thing worth asserting
+  // about the loop is WHAT it is handed, and a real Telegram long-poll cannot be asked.
+  startAdapter = startTelegram,
 } = {}) {
   const tokenFile = path.join(home, 'telegram-token');
   const configFile = path.join(dataDir, 'config.json');
   const pairingFile = path.join(dataDir, 'pairing.json');
 
-  let pairing = createPairingStore();
+  let pairing = null; // created by load(), then kept — see the note there
   let settings = { ...DEFAULT_SETTINGS };
   let appender = null;
   let bot = null;              // { id, username, name } once verified
@@ -83,7 +86,7 @@ export function createChannelService({
   let attempt = 0;
   let stopped = true;          // deliberate stop — suppresses the restart
 
-  const savePairing = () => writeJson(pairingFile, pairing.toJSON());
+  const savePairing = () => writeJson(pairingFile, pairing ? pairing.toJSON() : {});
   const saveSettings = () => writeJson(configFile, settings);
 
   async function readToken() {
@@ -100,7 +103,14 @@ export function createChannelService({
 
   async function load() {
     await mkdir(dataDir, { recursive: true });
-    pairing = createPairingStore(await readJson(pairingFile, {}), { now });
+    // Built ONCE and never replaced. spawnLoop() hands this exact object to the adapter, which
+    // holds it for the life of a polling loop — so rebuilding it here (as every service call
+    // used to) broke pairing in both directions at once: `pair()` minted the code into a fresh
+    // store the adapter could not see, so every redeem answered "unknown or expired code" no
+    // matter how many codes you generated; and `savePairing()` serialises whichever store this
+    // variable currently points at, so a redeem that DID land would have been persisted from
+    // the wrong object. Two aliases of one thing is the bug — there is only ever one store.
+    if (!pairing) pairing = createPairingStore(await readJson(pairingFile, {}), { now });
     settings = { ...DEFAULT_SETTINGS, ...(await readJson(configFile, {})) };
     if (!appender) appender = await createEventLog({ file: path.join(dataDir, 'events.jsonl'), host: 'channel' });
   }
@@ -110,7 +120,7 @@ export function createChannelService({
   function spawnLoop(botToken) {
     controller = new AbortController();
     running = true;
-    const done = startTelegram({
+    const done = startAdapter({
       botToken,
       baseUrl: bridge.baseUrl,
       token: bridge.token,
