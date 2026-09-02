@@ -38,6 +38,29 @@ const HELP = [
  * it needs is injected — a bot token, the bridge address+token, a pairing store, an event sink
  * — so nothing here reads a secret or reaches for global state.
  */
+// What a turn driven from a phone can actually DO, told to the agent up front.
+//
+// Without this the agent plans as if it were sitting at a terminal: asked to create a note it
+// announced it would look for a notes folder, discovered writes were not enabled, said "let me
+// check what notes tools are available" — and stopped mid-thought, having done nothing and
+// explained nothing. The ceiling is real and enforced elsewhere (reach caps the toolset); the
+// agent simply had no way to know about it, so it spent a turn discovering it and left the
+// user staring at half a sentence.
+export function channelSystem(userSystem, reach) {
+  const limits = !reach || reach === 'any' ? '' : [
+    "You are answering a message sent from the user's PHONE, relayed to this machine.",
+    reach === 'device'
+      ? 'You cannot read files, run commands, browse the web, or change anything.'
+      : "You can READ files and search the user's ChatPanel history. You cannot write or edit "
+        + 'files, run shell commands, or browse the web — those are switched off for messages '
+        + 'from a phone, and no tool will grant them.',
+    'If a request needs something you cannot do, say so plainly in your FIRST reply and offer '
+      + 'what you can do instead. Never begin work you cannot finish.',
+    'Answers are read on a phone: be brief, and put the answer first.',
+  ].join(' ');
+  return [limits, userSystem].filter(Boolean).join('\n\n');
+}
+
 export function startTelegram({
   botToken,
   baseUrl,
@@ -54,6 +77,15 @@ export function startTelegram({
   model = '',
   provider = '',
   system = '',
+  // Read at the START OF EACH MESSAGE rather than captured when the loop starts.
+  //
+  // `chats` below holds every conversation's history AND its privacy vault, and it lives only
+  // as long as this loop. Settings used to be baked in at start, so changing the model — or
+  // the privacy mode, or anything else — had to stop and respawn the loop, which silently threw
+  // all of that away: the next message arrived as "a fresh session with no prior conversation",
+  // and PERSON_1 stopped meaning the same person. Switching which model answers is not a
+  // reason to forget what you were talking about.
+  route = null,
   redact = { tier: 'basic' },
   privacy = 'standard',
   logger = console,
@@ -120,7 +152,7 @@ export function startTelegram({
     }
     if (name === 'stop') {
       const st = chatState(norm.chatId);
-      const ok = await transport.cancel(st.runId, { baseUrl, token });
+      const ok = await ((route && route().transport) || transport).cancel(st.runId, { baseUrl, token });
       st.runId = null;
       return void send(norm.chatId, ok ? '⏹ stopped.' : 'nothing running.');
     }
@@ -157,11 +189,22 @@ export function startTelegram({
     // on the bridge renders all-but-last as history and the last as "answer this now".
     const messages = [...st.history, { role: 'user', content: redacted }];
 
+    // Whatever the settings say RIGHT NOW — see `route` above.
+    const live = (route && route()) || {};
+    const useTransport = live.transport || transport;
     try {
-      const finalState = await transport.chat(
-        { agent, model, provider, system, messages, images, options: { reach } },
+      const finalState = await useTransport.chat(
         {
-          baseUrl, token, signal,
+          agent: live.agent ?? agent,
+          model: live.model ?? model,
+          provider: live.provider ?? provider,
+          system: channelSystem(live.system ?? system, reach),
+          messages,
+          images,
+          options: { reach },
+        },
+        {
+          baseUrl: live.baseUrl || baseUrl, token, signal,
           onEvent: (ev, state) => {
             if (state.runId) st.runId = state.runId;
             // Driven by the folded STATE, not by an event's `type`: the bridge emits

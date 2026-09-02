@@ -132,14 +132,28 @@ export function createChannelService({
   function spawnLoop(botToken) {
     controller = new AbortController();
     running = true;
-    // One choice, resolved here so the adapter never has to ask "which kind am I?".
-    const viaGateway = !!settings.model;
+    // Resolved PER MESSAGE, not once at start. The loop owns every conversation's history and
+    // privacy vault, so restarting it to pick up a settings change threw away the thing the
+    // user came for. Now nothing needs a restart: the next message simply reads this.
+    const route = () => {
+      const viaGateway = !!settings.model;
+      return {
+        transport: viaGateway ? gateway : bridgeTransport,
+        agent: viaGateway ? '' : settings.agent,
+        model: viaGateway ? settings.model : '',
+        provider: viaGateway ? (settings.provider || '') : '',
+        baseUrl: viaGateway ? (settings.gatewayUrl || DEFAULT_GATEWAY_URL) : bridge.baseUrl,
+        system: settings.system || '',
+        privacy: settings.privacy,
+      };
+    };
     const done = startAdapter({
       botToken,
-      transport: viaGateway ? gateway : bridgeTransport,
-      model: viaGateway ? settings.model : '',
-      provider: viaGateway ? (settings.provider || '') : '',
-      baseUrl: viaGateway ? (settings.gatewayUrl || DEFAULT_GATEWAY_URL) : bridge.baseUrl,
+      route,
+      transport: route().transport,
+      model: route().model,
+      provider: route().provider,
+      baseUrl: route().baseUrl,
       token: bridge.token,
       pairing,
       savePairing,
@@ -258,8 +272,10 @@ export function createChannelService({
       if (patch.model) next.agent = '';
       settings = next;
       await saveSettings();
-      // Settings are read when the loop starts, so a change only lands on a restart.
-      if (running) { await this.stop(); await start(); }
+      // NO RESTART. The loop reads settings per message through `route`, and restarting it
+      // would discard every conversation's history and vault — which is exactly what made
+      // changing the model answer the next question with "this looks like a fresh session".
+      // The only change that still needs a restart is a new bot token, and connect() does that.
       return { settings: { ...settings } };
     },
 
