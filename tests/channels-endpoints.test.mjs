@@ -21,8 +21,14 @@ test('every channel route that changes anything is privileged', () => {
   for (const p of ['connect', 'pair', 'unpair', 'settings', 'disconnect']) {
     assert.match(server, new RegExp(`'/channels/${p}',`), `/channels/${p} must be in PRIVILEGED_POST`);
   }
-  assert.match(server, /PRIVILEGED_GET = new Set\(\['\/debug', '\/channels'\]\)/,
-    'GET /channels lists which phones may drive this machine — it is not a public reading');
+  // ...and the READ deliberately is not. This assertion used to require the opposite, which
+  // is how 0.11.0 shipped a status route the extension could never call: the panel holds
+  // `<all_urls>`, so its fetches bypass CORS and `Origin` rides only on non-GET methods, and a
+  // privileged GET can therefore only ever answer "forbidden". The pairing list is protected
+  // by the origin allowlist refusing web pages (asserted in guard.test.mjs), and a local
+  // process can read ~/.chatpanel/channels/ off the disk regardless.
+  assert.match(server, /PRIVILEGED_GET = new Set\(\['\/debug'\]\)/,
+    'GET /channels must stay unprivileged — a privileged GET is unreachable from the panel');
 });
 
 test('the channel service is loaded lazily and pointed at this bridge', () => {

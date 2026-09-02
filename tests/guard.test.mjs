@@ -71,6 +71,34 @@ test('the extension can read the skill store', async () => {
   assert.equal(await status('/skills', 'moz-extension://abc'), 200, 'Firefox too');
 });
 
+test('the extension can read the channel status', async () => {
+  // 0.11.0 shipped /channels as a privileged GET and the Telegram card could only ever say
+  // the bridge refused it. The panel holds `<all_urls>`, so its fetches bypass CORS and no
+  // preflight fires; `Origin` rides only on non-GET methods. The no-Origin case below IS the
+  // extension — it is not a hypothetical local script.
+  assert.equal(await status('/channels'), 200, 'the settings page sends no Origin on a GET');
+  assert.equal(await status('/channels', EXT), 200);
+  assert.equal(await status('/channels', 'moz-extension://abc'), 200, 'Firefox too');
+});
+
+test('a web page cannot read which phones are paired', async () => {
+  // What actually protects the pairing list, now that the GET is not privileged: a page
+  // always sends Origin, and the allowlist refuses it.
+  assert.equal(await status('/channels', 'https://evil.example'), 403);
+  assert.equal(await status('/channels', 'http://attacker.test'), 403);
+});
+
+test('configuring a channel stays privileged — those are POSTs, which do carry Origin', async () => {
+  // The asymmetry is the point: writes keep the guard because the browser gives them an
+  // Origin to be guarded by. Connecting a bot or enrolling a phone is a way into this machine.
+  for (const path of ['/channels/connect', '/channels/pair', '/channels/unpair', '/channels/settings', '/channels/disconnect']) {
+    const res = await fetch(`${BASE}${path}`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    assert.equal(res.status, 403, `${path} must refuse a no-Origin caller`);
+  }
+});
+
 test('/debug stays privileged — it exposes what a local process cannot otherwise see', async () => {
   assert.equal(await status('/debug'), 403, 'a no-Origin caller must not get configuration');
   assert.equal(await status('/debug', 'https://evil.example'), 403);

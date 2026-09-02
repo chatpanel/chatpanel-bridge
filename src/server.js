@@ -67,7 +67,7 @@ import {
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.11.0';
+const VERSION = '0.11.1';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -337,8 +337,19 @@ const PRIVILEGED_POST = new Set([
   '/channels/settings',
   '/channels/disconnect',
 ]);
-// /channels lists which phones may drive this machine. That is not a public reading.
-const PRIVILEGED_GET = new Set(['/debug', '/channels']);
+// /channels is NOT here, for the same reason /skills is not, and it was a regression to add
+// it: a privileged GET is unreachable from the extension. The panel holds `<all_urls>`, so
+// its fetches bypass CORS altogether — no preflight fires — and the Fetch spec attaches
+// `Origin` only to requests whose method is not GET or HEAD. That is the whole asymmetry:
+// every privileged POST here works, and a privileged GET can only ever answer the settings
+// page with "forbidden: this endpoint requires the ChatPanel extension or a valid bridge
+// token", which is what shipped in 0.11.0.
+//
+// Nothing is opened up by removing it. `originAllowed` still refuses any web page (it is the
+// check doing the work), so the only caller admitted is a local no-Origin process — which can
+// already read ~/.chatpanel/channels/ off the disk. /debug stays privileged: it exposes
+// configuration a local process cannot otherwise see.
+const PRIVILEGED_GET = new Set(['/debug']);
 
 // /skills* is NOT privileged, and that is a considered position rather than a
 // convenience. `privileged` adds exactly one thing over the origin allowlist: it requires
