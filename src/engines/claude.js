@@ -49,6 +49,37 @@ const IDLE_MS = Number(process.env.CHATPANEL_CLAUDE_TIMEOUT_MS) || 180_000;
 // gated behind the agent's permission mode.
 const READONLY_TOOLS = ['Read', 'Grep', 'Glob', 'WebFetch', 'WebSearch', 'TodoWrite', 'Task'];
 
+// A remote (channel) caller declares the actor's trust tier via options.reach. Unlike
+// permissionMode (which a local, already-trusted UI chooses), reach is a CEILING enforced HERE
+// at the trust boundary — a paired-but-prompt-injected phone cannot exceed its tier no matter
+// what the message says. This is the tool-authorization half of feature-f7 §7; pairing proves
+// WHO, this constrains WHAT.
+//
+// Posture (security-first): the exfil chain needs read-a-secret AND an egress to send it. We cut
+// the egress on every capped tier by dropping web tools, so even machine-wide reads can't phone
+// home; writes/shell are never granted to a capped tier.
+//   device  — conversational only: no filesystem, no web, no writes/shell.
+//   trusted — machine-wide READ (inspect your own files/projects), but NO web and NO writes/shell.
+//   any     — no cap here (operator/local console); falls through to permissionMode below.
+const CHANNEL_ALLOW = Object.freeze({
+  device: Object.freeze(['TodoWrite', 'Task']),
+  trusted: Object.freeze(['Read', 'Grep', 'Glob', 'TodoWrite', 'Task']),
+});
+// Belt-and-suspenders: the allow-list already omits these, but we also forbid them explicitly so
+// a capped turn can never reach shell, writes, or a network egress even via an MCP alias.
+const CHANNEL_DENY = Object.freeze(['Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch']);
+
+/**
+ * Tool policy for a channel/remote caller. Returns { allow, deny } for a capped tier, or null
+ * when reach is absent or 'any' (no cap — the existing permissionMode logic applies). An unknown
+ * tier is treated as the MOST restrictive ('device'), never as "no cap" — fail closed.
+ */
+export function channelToolPolicy(reach) {
+  if (!reach || reach === 'any') return null;
+  const allow = CHANNEL_ALLOW[reach] || CHANNEL_ALLOW.device;
+  return { allow: [...allow], deny: [...CHANNEL_DENY] };
+}
+
 let lastReason = 'Claude Code not found.';
 let lastProbe = 0;
 let cachedOk = false;
@@ -272,10 +303,19 @@ export async function chat({ messages, system, options, images }, emit, { signal
     mcpAllow.push(...mcpConfig.allowedTools);
   }
 
+  // A remote (channel) caller's reach tier caps the toolset and OVERRIDES permissionMode: a
+  // capped tier never gets --permission-mode, so writes/shell stay denied headlessly even if a
+  // message (or a bug upstream) asked to escalate. Local callers (no reach) keep the existing
+  // permissionMode behavior unchanged.
+  const channelPolicy = channelToolPolicy(options.reach);
+  if (channelPolicy) {
+    args.push('--allowedTools', ...channelPolicy.allow, ...mcpAllow);
+    args.push('--disallowedTools', ...channelPolicy.deny);
+  }
   // Gate writes/shell behind the chosen mode; otherwise restrict to read-only
   // tools so headless runs never block on an approval prompt. The relayed browser
   // tools are always pre-allowed (the user explicitly armed them this turn).
-  if (permissionMode === 'bypassPermissions') args.push('--permission-mode', 'bypassPermissions');
+  else if (permissionMode === 'bypassPermissions') args.push('--permission-mode', 'bypassPermissions');
   else if (permissionMode === 'acceptEdits') {
     args.push('--permission-mode', 'acceptEdits');
     if (mcpAllow.length) args.push('--allowedTools', ...mcpAllow);

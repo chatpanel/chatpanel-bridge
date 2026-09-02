@@ -67,7 +67,7 @@ import {
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.10.42';
+const VERSION = '0.11.0';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -244,6 +244,57 @@ function ensureToken() {
     log('error', `could not initialise bridge token: ${e?.message || e}`);
   }
 }
+// ---------------------------------------------------------------------------
+// CHANNELS — a messaging surface (Telegram today) driving a local agent.
+//
+// Hosted HERE because a channel has to be running when nobody is looking: the point is to
+// reach your machine from a phone with the browser closed, and the bridge is the only
+// always-on local process a ChatPanel user already has. The alternative — a second daemon, or
+// an npm install, or a service worker Chrome suspends — is another thing a non-technical
+// person has to install and keep alive, which is the same as not shipping it.
+//
+// The bridge owns transport and auth; @chatpanel/channels (vendored to src/channels) owns the
+// contract: verify a bot, hold its token 0600, enroll a phone by one-time code, cap it with
+// `reach`, redact both ways. Loaded lazily so the redaction engine never touches a boot where
+// no channel is configured.
+let channelsSvc = null;
+async function channelService() {
+  if (channelsSvc) return channelsSvc;
+  const { createChannelService } = await import('./channels/service.js');
+  channelsSvc = createChannelService({
+    home: join(os.homedir(), '.chatpanel'),
+    dataDir: join(os.homedir(), '.chatpanel', 'channels'),
+    // It talks to THIS bridge as a privileged local client — same port, same token it just
+    // read. No second address to configure and get wrong.
+    bridge: { baseUrl: `http://127.0.0.1:${PORT}`, token: AUTH_TOKEN },
+    logger: { log: (m) => log('info', m), warn: (m) => log('info', m), error: (m) => log('error', m) },
+  });
+  return channelsSvc;
+}
+
+async function handleChannels(req, res, action) {
+  try {
+    const svc = await channelService();
+    const body = req.method === 'POST' ? await readBody(req) : {};
+    if (action === 'status') return json(res, 200, await svc.status());
+    if (action === 'connect') {
+      // The token is verified with Telegram before it is written, so a typo fails HERE, in the
+      // settings screen, with a reason — not later as a silent poll loop nobody reads the logs of.
+      const r = await svc.connect(body);
+      return json(res, 200, { ok: true, ...r });
+    }
+    if (action === 'pair') return json(res, 200, await svc.pair());
+    if (action === 'unpair') return json(res, 200, await svc.unpair(String(body.actorId || '')));
+    if (action === 'settings') return json(res, 200, await svc.update(body));
+    if (action === 'disconnect') return json(res, 200, await svc.stop({ forget: !!body.forget }));
+    return json(res, 404, { error: 'unknown channel action' });
+  } catch (e) {
+    // A readable reason, because every one of these is something a person can fix: a bad token,
+    // a bot not created yet, no network.
+    return json(res, 400, { error: e?.message || String(e) });
+  }
+}
+
 function tokenOk(req) {
   if (!AUTH_TOKEN) return false;
   const h = String(req.headers['authorization'] || '');
@@ -278,8 +329,16 @@ const PRIVILEGED_POST = new Set([
   // endpoint that touches a run is already guarded. An unauthenticated hole next to nine
   // guarded neighbours is a hole regardless of how little it grants.
   '/cancel',
+  // A channel is a way into this machine from the internet. Everything that configures one —
+  // and the code that enrolls a phone — is as privileged as /chat itself.
+  '/channels/connect',
+  '/channels/pair',
+  '/channels/unpair',
+  '/channels/settings',
+  '/channels/disconnect',
 ]);
-const PRIVILEGED_GET = new Set(['/debug']);
+// /channels lists which phones may drive this machine. That is not a public reading.
+const PRIVILEGED_GET = new Set(['/debug', '/channels']);
 
 // /skills* is NOT privileged, and that is a considered position rather than a
 // convenience. `privileged` adds exactly one thing over the origin allowlist: it requires
@@ -1123,6 +1182,10 @@ const server = createServer(async (req, res) => {
       if (req.method === 'GET') { res.writeHead(405); return res.end(); } // no server-initiated stream
       if (req.method === 'DELETE') { deleteSession(sid); res.writeHead(204); return res.end(); }
     }
+    if (req.method === 'GET' && url.pathname === '/channels') return handleChannels(req, res, 'status');
+    if (req.method === 'POST' && url.pathname.startsWith('/channels/')) {
+      return handleChannels(req, res, url.pathname.slice('/channels/'.length));
+    }
     if (req.method === 'POST' && url.pathname === '/cancel') return handleCancel(req, res);
     if (req.method === 'POST' && url.pathname === '/tool-result') return handleToolResult(req, res);
     if (req.method === 'POST' && url.pathname === '/mcp-local') return handleMcpLocal(req, res);
@@ -1237,6 +1300,17 @@ function startServer() {
       log('info', `  ${a.ok ? '✓' : '✕'} ${label}${a.ok ? '' : ' — ' + (a.reason || 'unavailable')}`);
     }
     log('info', 'Open the ChatPanel side panel; installed agents (Claude Code, Codex, Antigravity) appear automatically.');
+    // A channel someone connected last week must come back by itself after a reboot — nobody
+    // is at the keyboard to press start, which is the entire premise of driving this from a
+    // phone. Nothing loads and nothing runs until a bot has actually been connected.
+    channelService()
+      .then((svc) => svc.startIfConfigured())
+      .then((r) => {
+        if (r?.skipped) return;
+        if (r?.ok) log('info', 'channels: telegram connected — polling for messages');
+        else log('error', `channels: telegram not started — ${r?.error || 'unknown error'}`);
+      })
+      .catch((e) => log('error', `channels: ${e?.message || e}`));
   });
 }
 

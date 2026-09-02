@@ -1,6 +1,6 @@
 {
   "name": "@chatpanel/bridge",
-  "version": "0.10.42",
+  "version": "0.11.0",
   "type": "module",
   "description": "Local bridge that exposes the AI coding agents installed on your machine \u2014 Claude Code (CLI), Codex (CLI), and Antigravity CLI (formerly Gemini CLI, which remains available for business/enterprise) \u2014 to the ChatPanel Chrome extension over a localhost SSE endpoint. Bring your own agent.",
   "keywords": [
@@ -38,7 +38,11 @@
     "test": "node --test tests/*.test.mjs",
     "build:bin": "bash scripts/build-binaries.sh",
     "sync:events": "node scripts/sync-events.mjs",
-    "test:events-sync": "node scripts/sync-events.mjs --check"
+    "test:events-sync": "node scripts/sync-events.mjs --check",
+    "sync:pii": "node scripts/sync-pii.mjs",
+    "sync:channels": "node scripts/sync-channels.mjs",
+    "test:pii-sync": "node scripts/sync-pii.mjs --check",
+    "test:channels-sync": "node scripts/sync-channels.mjs --check"
   },
   "dependencies": {},
   "optionalDependencies": {

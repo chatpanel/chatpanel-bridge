@@ -21,7 +21,15 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // Deliberately short. `skill-manifest.js` imports only `scopes.js`, which is why that
 // vocabulary was split out of `capability.js` — vendoring the capability machinery and
 // the event schema to reach a five-element array would defeat the point.
-const FILES = ['scopes.js', 'skill-manifest.js', 'skill-scan.js'];
+// The channel service brings the second group: `event.js` (+ its `ref.js`) is the audit
+// appender every channel turn writes through, `capability.js` (+ `view.js`, `scopes.js`) is
+// the invocation contract it validates against, and `reach.js` is the ladder that caps a
+// paired phone. `reach.js` exists as its own module for exactly this reason — the ladder is
+// three strings, and taking it out of `router.js` would have vendored 50 KB of model routing.
+const FILES = [
+  'scopes.js', 'skill-manifest.js', 'skill-scan.js',
+  'ref.js', 'event.js', 'view.js', 'capability.js', 'reach.js',
+];
 
 function pkgDir() {
   return [

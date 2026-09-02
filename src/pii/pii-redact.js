@@ -1,0 +1,399 @@
+// GENERATED — do not edit.
+// Source of truth: chatpanel-pii/pii-redact.js (npm @chatpanel/pii).
+// Edit there, then run: npm run sync:pii
+//
+// Vendored rather than depended on: the bridge ships zero runtime dependencies so a
+// curl one-liner install cannot fail on someone's registry, and so the compiled
+// single-file binary has nothing to resolve.
+
+// Reversible PII redaction.
+//
+// Strips sensitive values out of everything that leaves the device for a model
+// (chat text, attached page/meeting context, and tool results we feed back), then
+// reconstructs the originals when the reply is rendered to the user. The model
+// only ever sees opaque, stable placeholders like [[EMAIL_1]] / [[PERSON_2]] — so
+// it can still reason about "who said what" without seeing the real values.
+//
+// Pure + dependency-free so it is unit-testable and runs identically for API and
+// CLI/bridge agents (both assemble their outbound payload through providers.js).
+//
+// Tiers:
+//   'basic' — deterministic regex: emails, phones, IPs, cards (Luhn), SSNs, keys.
+//   'full'  — basic + entity-aware: known people/orgs (meeting roster, contacts,
+//             the user's own identity) and a user-editable custom dictionary.
+//
+// Reversibility caveat: if the model paraphrases instead of echoing a token, that
+// one reference won't restore (it shows the token) — but the privacy guarantee
+// (the real value never left the device) always holds.
+
+import { stripHidden, confusablesSkeleton } from './sanitize.js';
+
+const TOKEN_RE = /\[\[([A-Z][A-Z0-9]*)_(\d+)\]\]/g;
+
+// Bracket-TOLERANT match of the same token. Smaller models routinely drop or mangle
+// the [[ ]] when echoing a placeholder into tool-call JSON — e.g. they emit "ORG_1"
+// or "[ORG_1]" instead of "[[ORG_1]]" — which the strict TOKEN_RE misses, leaving
+// the tool to search the literal "ORG_1" (and get nothing). We match 0–2 brackets
+// on each side and reconstruct the canonical token to look up; only ACTUAL vault
+// tokens are swapped, so a coincidental "ABC_1" that isn't ours is left untouched.
+const TOLERANT_TOKEN_RE = /\[{0,2}([A-Z][A-Z0-9]*_\d+)\]{0,2}/g;
+
+// A vault is the per-conversation mapping between placeholders and originals. Keep
+// one per conversation so PERSON_1 means the same entity across turns.
+export function createVault() {
+  // `aliases` maps a pseudonym (e.g. "Robin") back to the real value (e.g. "Alex Rivera")
+  // so LOCAL tool calls (history/meeting search) can run on real data. The reply
+  // restorer ignores it — pseudonyms stay permanent in the user's view.
+  return { byToken: new Map(), byValue: new Map(), counts: new Map(), aliases: new Map() };
+}
+
+export function vaultToJSON(vault) {
+  return {
+    entries: [...(vault?.byToken || new Map())].map(([token, value]) => ({ token, value })),
+    aliases: [...(vault?.aliases || new Map())].map(([alias, value]) => ({ alias, value })),
+  };
+}
+
+export function vaultFromJSON(data) {
+  const vault = createVault();
+  for (const { token, value } of data?.entries || []) {
+    const m = /^\[\[([A-Z][A-Z0-9]*)_(\d+)\]\]$/.exec(token);
+    vault.byToken.set(token, value);
+    vault.byValue.set(value, token);
+    if (m) vault.counts.set(m[1], Math.max(vault.counts.get(m[1]) || 0, Number(m[2])));
+  }
+  for (const { alias, value } of data?.aliases || []) vault.aliases.set(alias, value);
+  return vault;
+}
+
+function tokenFor(vault, type, value) {
+  const existing = vault.byValue.get(value);
+  if (existing) return existing;
+  const t = String(type || 'PII').toUpperCase().replace(/[^A-Z0-9]/g, '') || 'PII';
+  const n = (vault.counts.get(t) || 0) + 1;
+  vault.counts.set(t, n);
+  const token = `[[${t}_${n}]]`;
+  vault.byToken.set(token, value);
+  vault.byValue.set(value, token);
+  return token;
+}
+
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Reject a user-supplied dictionary regex that is a likely ReDoS (catastrophic
+// backtracking) BEFORE compiling + running it on untrusted-length input. Heuristic,
+// not exhaustive: cap length, and reject the classic nested-quantifier families —
+// a quantified group whose body also has a quantifier ((a+)+ / (a*)* / (.*)+) and
+// back-to-back unbounded quantifiers (a**, .*+). A rejected pattern is skipped like a
+// syntactically-invalid one, so redaction never breaks or hangs.
+function isSafeUserPattern(p) {
+  if (typeof p !== 'string' || p.length === 0 || p.length > 200) return false;
+  if (/\([^)]*[+*}][^)]*\)\s*[+*{]/.test(p)) return false; // (…quantifier…)quantifier
+  if (/[+*]\s*[+*]/.test(p)) return false;                  // a**, a+*, .*+
+  return true;
+}
+
+// Apply many find/replace rules in a SINGLE left-to-right pass over the source.
+// Each rule is { re: <global RegExp>, repl: (match) => string }. Unlike running
+// rule[0].replace then rule[1].replace then …, text emitted by one rule is NEVER
+// re-scanned by a later rule — so substitutions can't cascade (e.g. a pseudonym
+// that happens to equal another entry's input). On a tie at the same position the
+// earlier rule wins (rules carry priority by their order in the array).
+function applyRulesOnce(text, rules) {
+  if (!rules || rules.length === 0) return text;
+  let out = '';
+  let pos = 0;
+  const n = text.length;
+  while (pos <= n) {
+    let best = null;
+    let bestRule = null;
+    for (const rule of rules) {
+      rule.re.lastIndex = pos;
+      const m = rule.re.exec(text);
+      if (m && (best === null || m.index < best.index)) {
+        best = m;
+        bestRule = rule;
+        if (m.index === pos) break; // nothing can start earlier than the cursor
+      }
+    }
+    if (!best) { out += text.slice(pos); break; }
+    out += text.slice(pos, best.index);
+    if (best[0].length === 0) { // pathological empty match — emit a char, advance
+      out += text[best.index] ?? '';
+      pos = best.index + 1;
+    } else {
+      out += bestRule.repl(best);
+      pos = best.index + best[0].length;
+    }
+  }
+  return out;
+}
+
+function luhnValid(digits) {
+  let sum = 0;
+  let alt = false;
+  for (let i = digits.length - 1; i >= 0; i--) {
+    let d = digits.charCodeAt(i) - 48;
+    if (alt) { d *= 2; if (d > 9) d -= 9; }
+    sum += d;
+    alt = !alt;
+  }
+  return sum % 10 === 0;
+}
+
+// Plausible IPv6? Controls false positives from the broad IPV6 regex: accept only a
+// `::`-compressed form (≥1 hextet) or a full 8-hextet address, hextets ≤4 hex digits.
+function isLikelyIpv6(s) {
+  if (!/^[0-9A-Fa-f:]+$/.test(s) || (s.match(/:/g) || []).length < 2) return false;
+  const parts = s.split(':');
+  if (parts.some((p) => p.length > 4)) return false;
+  if (s.includes('::')) return parts.filter(Boolean).length >= 1 && parts.filter(Boolean).length <= 7;
+  return parts.length === 8 && parts.every((p) => p.length >= 1);
+}
+
+// Deterministic detectors. Each: { type, re, valid? }. Order = priority; more
+// specific patterns run first so they win the bytes before greedier ones.
+const DETECTORS = [
+  // PEM private-key block (multi-line) — highest priority, most specific.
+  { type: 'SECRET', re: /-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9]+ )*PRIVATE KEY-----/g },
+  { type: 'EMAIL', re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
+  // SSN: dash- OR space-separated (bare 9-digit is left alone — too false-positive-prone).
+  { type: 'SSN', re: /\b\d{3}[-\s]\d{2}[-\s]\d{4}\b/g },
+  {
+    // Vendor API keys / tokens. sk-… also covers OpenAI sk-proj-/sk-ant-. Adds Google
+    // (AIza…), Stripe (sk_live_/rk_test_…), GitHub fine-grained PATs, Slack xapp-.
+    type: 'KEY',
+    re: /\b(?:sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[0-9A-Za-z_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|xapp-[0-9]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|[rs]k_(?:live|test)_[0-9A-Za-z]{16,})\b/g,
+  },
+  // JWT — three base64url segments; `eyJ` is base64 of `{"…`, so this is specific.
+  { type: 'KEY', re: /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\b/g },
+  {
+    type: 'IP',
+    re: /\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g,
+  },
+  {
+    // IPv6 (incl. :: compression). Broad match narrowed by isLikelyIpv6 to curb FPs.
+    type: 'IP',
+    re: /(?<![:\w])(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4}(?![:\w])/g,
+    valid: (m) => isLikelyIpv6(m),
+  },
+  {
+    // Phone: only count it if it has a separator or a leading + and 7–15 digits —
+    // so long bare ids (a 11-digit page id, an order number) are NOT redacted.
+    type: 'PHONE',
+    re: /(?<![\w.])\+?\d[\d ().-]{6,}\d(?![\w])/g,
+    valid: (m) => {
+      const digits = m.replace(/\D/g, '');
+      // Needs a separator / leading + OR be a bare 10-digit run (a typed phone like
+      // 9320434444). 11+ bare digits still require formatting so long ids aren't hit.
+      return digits.length >= 7 && digits.length <= 15
+        && (/[ ().-]/.test(m) || m.trimStart().startsWith('+') || digits.length === 10);
+    },
+  },
+  {
+    type: 'CARD',
+    re: /\b(?:\d[ -]?){13,19}\b/g,
+    valid: (m) => { const d = m.replace(/\D/g, ''); return d.length >= 13 && d.length <= 19 && luhnValid(d); },
+  },
+];
+
+// Redact `text`, recording placeholders in `vault`. `entities` (full tier) is a
+// list of { value, type } known names/orgs; `dictionary` is the user's custom
+// list of { value, type } (exact strings) or { pattern, flags, type } (regex).
+export function redactText(text, vault, {
+  tier = 'basic',
+  entities = [],
+  dictionary = [],
+  sanitize = true,
+  sanitizeOpts = undefined,
+} = {}) {
+  if (text == null || text === '') return text;
+  // De-steganography BEFORE detection, in-band: an obfuscated value
+  // (j<ZWSP>o<ZWSP>hn@x.com, homoglyphs, ASCII-smuggled Tag chars) must become
+  // matchable so the regex/NER can't be trivially bypassed. Callers used to have to
+  // remember to stripHidden() first; folding it in here makes the engine safe on its
+  // own — the sanitize:false escape hatch is only for a caller that already did it.
+  let out = sanitize ? stripHidden(String(text), sanitizeOpts) : String(text);
+  const v = vault || createVault();
+
+  const entityTier = tier === 'full' || tier === 'entities';
+
+  // 1) User dictionary first — highest authority, user explicitly chose these.
+  //    An entry with `alias` PSEUDONYMIZES: permanent substitution (the model and
+  //    the user's transcript both see the alias, never reversed). Otherwise it
+  //    REDACTS to a reversible [[TYPE_n]] placeholder restored in the user's view.
+  //    All entries are applied in ONE pass (applyRulesOnce): an alias produced by
+  //    one entry must not be re-matched by a later entry, or substitutions cascade
+  //    (e.g. value 'Arnav'→alias 'John' then 'John' caught by a later 'John' rule).
+  const dictRules = [];
+  for (const d of dictionary || []) {
+    if (!d) continue;
+    let re;
+    try {
+      re = d.pattern
+        ? (isSafeUserPattern(d.pattern) ? new RegExp(d.pattern, d.flags && /g/.test(d.flags) ? d.flags : `${d.flags || ''}g`) : null)
+        : (d.value ? new RegExp(`(?<![\\w])${escapeRegex(d.value)}(?![\\w])`, 'gi') : null);
+    } catch {
+      re = null; // a bad user regex must never break redaction
+    }
+    if (!re) continue;
+    if (d.alias != null && d.alias !== '') {
+      // pseudonymize: model + reply see the alias…
+      // …but record alias→original so LOCAL tool args (history/meeting search) map
+      // back to the real value. Local lookups must hit real data; only the model is blinded.
+      if (d.value) v.aliases.set(d.alias, d.value);
+      dictRules.push({ re, repl: () => d.alias });
+    } else {
+      const type = d.type || (d.pattern ? 'PII' : 'TERM');
+      dictRules.push({ re, repl: (m) => tokenFor(v, type, d.pattern ? m[0] : d.value) });
+    }
+  }
+  out = applyRulesOnce(out, dictRules);
+
+  // 2) Known entities (full tier) — longest value first so "Alex Rivera" wins
+  //    before a bare "Alex". Restores to the canonical entity value.
+  if (entityTier) {
+    const ents = [...(entities || [])].filter((e) => e && e.value)
+      .sort((a, b) => String(b.value).length - String(a.value).length);
+    for (const e of ents) {
+      const re = new RegExp(`(?<![\\w])${escapeRegex(e.value)}(?![\\w])`, 'gi');
+      out = out.replace(re, () => tokenFor(v, e.type || 'PERSON', e.value));
+    }
+  }
+
+  // 3) Deterministic detectors (all tiers). Detect against a CONFUSABLES SKELETON so
+  //    homoglyph-obfuscated values (Cyrillic/Greek/fullwidth Latin look-alikes) match
+  //    the ASCII regexes — but REDACT the ORIGINAL span. The fold is 1:1 per code point,
+  //    so a skeleton match's indices line up with `out`, and legitimate non-Latin text
+  //    (which won't match a detector) is never rewritten. Higher-priority detectors
+  //    (earlier in DETECTORS) claim overlapping spans first, matching the old order.
+  const skel = confusablesSkeleton(out);
+  const taken = []; // non-overlapping [start,end) spans, in priority order
+  const overlaps = (s, e) => taken.some((t) => s < t.end && e > t.start);
+  for (const det of DETECTORS) {
+    det.re.lastIndex = 0;
+    let m;
+    while ((m = det.re.exec(skel)) !== null) {
+      if (m[0].length === 0) { det.re.lastIndex++; continue; }
+      const start = m.index, end = start + m[0].length;
+      if ((det.valid && !det.valid(m[0])) || overlaps(start, end)) continue;
+      taken.push({ start, end, type: det.type });
+    }
+  }
+  if (taken.length) {
+    taken.sort((a, b) => a.start - b.start);
+    let rebuilt = '';
+    let pos = 0;
+    for (const t of taken) {
+      rebuilt += out.slice(pos, t.start) + tokenFor(v, t.type, out.slice(t.start, t.end));
+      pos = t.end;
+    }
+    out = rebuilt + out.slice(pos);
+  }
+  return out;
+}
+
+// Re-redact a tool RESULT before the model sees it, walking the shapes tools
+// actually return: a bare string, a { text } object, an array, and the
+// MCP-standard { content: [{ type:'text', text }] } (incl. an embedded
+// { resource: { text } }). Only text-bearing fields are redacted — arbitrary
+// fields (ids, urls, mime types) are left intact so tool results stay valid.
+// Restore is the inverse concern; this only runs on the model-facing direction.
+export function redactResultShape(raw, vault, opts) {
+  if (raw == null || typeof raw === 'string') {
+    return raw == null ? raw : redactText(raw, vault, opts);
+  }
+  if (Array.isArray(raw)) return raw.map((r) => redactResultShape(r, vault, opts));
+  if (typeof raw === 'object') {
+    let out = raw;
+    if (typeof raw.text === 'string') out = { ...out, text: redactText(raw.text, vault, opts) };
+    if (Array.isArray(raw.content)) out = { ...out, content: raw.content.map((c) => redactResultShape(c, vault, opts)) };
+    if (raw.resource && typeof raw.resource === 'object' && typeof raw.resource.text === 'string') {
+      out = { ...out, resource: { ...raw.resource, text: redactText(raw.resource.text, vault, opts) } };
+    }
+    return out;
+  }
+  return raw;
+}
+
+// Swap placeholders back to their originals. Unknown tokens are left untouched.
+export function restoreText(text, vault) {
+  if (text == null || !vault) return text;
+  return String(text).replace(TOLERANT_TOKEN_RE, (m, inner) => {
+    const canonical = `[[${inner}]]`;
+    return vault.byToken.has(canonical) ? vault.byToken.get(canonical) : m;
+  });
+}
+
+// Restore for LOCAL use only — e.g. tool-call args that hit on-device history /
+// meeting search. Undoes reversible tokens AND pseudonyms, so local lookups run on
+// the real values. NOT used for the user-facing reply (pseudonyms stay there).
+export function restoreWithAliases(text, vault) {
+  let out = restoreText(text, vault);
+  if (vault?.aliases?.size) {
+    // ONE pass over every alias at once. Looping `replace` per alias re-scans the
+    // output and cascades when one alias's real value equals another alias (e.g.
+    // 'Twinkle'→'John' then 'John'→'Arnav'): the model's "Twinkle" would walk the
+    // chain to "Arnav". A single alternation replaces each span exactly once.
+    // Longest alias first so a multi-word pseudonym wins over its prefix.
+    const aliases = [...vault.aliases.keys()].filter(Boolean).sort((a, b) => b.length - a.length);
+    if (aliases.length) {
+      const re = new RegExp(`(?<![\\w])(?:${aliases.map(escapeRegex).join('|')})(?![\\w])`, 'g');
+      out = out.replace(re, (m) => (vault.aliases.has(m) ? vault.aliases.get(m) : m));
+    }
+  }
+  return out;
+}
+
+// True if the text still contains any redaction placeholder (useful for streaming
+// restore — buffer a tail when a token may be split across chunks).
+export function hasToken(text) {
+  TOKEN_RE.lastIndex = 0;
+  return TOKEN_RE.test(String(text || ''));
+}
+
+// ── What was redacted, for the user's own eyes ──────────────────────────────────────────
+//
+// The privacy promise is invisible unless you can SEE it: which entity types were caught,
+// how many of each, and (on request) the actual before → after pairs. All of that already
+// exists in the vault — this just summarises it, so every client renders the same shape
+// instead of each one re-deriving it.
+//
+// PRIVACY OF THE SUMMARY ITSELF: `types` carries counts only, never values, so it is safe
+// to render, log or persist. Real values live behind `pairs`, which a caller must ask for
+// explicitly (`includeValues: true`) — they are the user's own data, shown on their own
+// device, and must never be written anywhere durable.
+
+/** Entity type + count for everything this vault redacted, most-frequent first. */
+export function redactionSummary(vault, { includeValues = false, maxPairs = 200 } = {}) {
+  const byType = new Map();
+  const pairs = [];
+  for (const [token, value] of vault?.byToken || new Map()) {
+    const m = /^\[\[([A-Z][A-Z0-9]*)_(\d+)\]\]$/.exec(token);
+    const type = m ? m[1] : 'OTHER';
+    byType.set(type, (byType.get(type) || 0) + 1);
+    if (includeValues && pairs.length < maxPairs) pairs.push({ token, value, type });
+  }
+  const types = [...byType.entries()]
+    .map(([type, count]) => ({ type, count }))
+    .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type));
+  return {
+    total: types.reduce((n, t) => n + t.count, 0),
+    types,
+    ...(includeValues ? { pairs } : {}),
+  };
+}
+
+/** Merge several vault summaries (e.g. every conversation) into one. Counts only. */
+export function mergeRedactionSummaries(summaries) {
+  const byType = new Map();
+  for (const s of summaries || []) {
+    for (const t of s?.types || []) byType.set(t.type, (byType.get(t.type) || 0) + t.count);
+  }
+  const types = [...byType.entries()]
+    .map(([type, count]) => ({ type, count }))
+    .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type));
+  return { total: types.reduce((n, t) => n + t.count, 0), types };
+}
