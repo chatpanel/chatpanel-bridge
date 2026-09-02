@@ -78,7 +78,20 @@ export async function checkForUpdate(current, { force = false } = {}) {
 
   let latest = null;
   let assetUrl = null;
+  // Whether `latest` is a real answer or yesterday's. GitHub's unauthenticated API is 60
+  // requests/hour per IP, and a developer machine burns that easily — so the fallback below
+  // is not rare, it fires regularly. Saying WHICH it is matters: acting on a stale "latest"
+  // is how a forced check reported "already on the latest version" minutes after a newer one
+  // was published, and how an earlier update landed on a version that was not the newest and
+  // called it a success.
+  let stale = false;
+  let error = '';
   const cache = await readCache();
+  const fallBackToCache = () => {
+    latest = cache?.latest || null;
+    assetUrl = cache?.assetUrl || null;
+    stale = true;
+  };
   if (!force && cache && Date.now() - cache.checkedAt < CHECK_EVERY_MS) {
     latest = cache.latest;
     assetUrl = cache.assetUrl;
@@ -91,12 +104,12 @@ export async function checkForUpdate(current, { force = false } = {}) {
         assetUrl = want ? (data.assets || []).find((a) => a.name === want)?.browser_download_url || null : null;
         await writeCache({ checkedAt: Date.now(), latest, assetUrl });
       } else {
-        latest = cache?.latest || null;
-        assetUrl = cache?.assetUrl || null;
+        error = res.status === 403 ? 'GitHub rate limit (60/hour per IP) — try again later' : `HTTP ${res.status}`;
+        fallBackToCache();
       }
-    } catch {
-      latest = cache?.latest || null;
-      assetUrl = cache?.assetUrl || null;
+    } catch (e) {
+      error = e?.message || String(e);
+      fallBackToCache();
     }
   }
   const updateAvailable = !!latest && cmp(latest, current) > 0;
@@ -110,6 +123,8 @@ export async function checkForUpdate(current, { force = false } = {}) {
     mode,
     canSelfUpdate,
     assetUrl,
+    stale,
+    error,
     npmCommand: mode === 'npm' ? 'npm i -g @chatpanel/bridge@latest' : null,
   };
 }
@@ -122,10 +137,16 @@ export async function selfUpdate(current) {
     throw new Error('Self-update applies only to the standalone binary. Update the npm/npx version with npm.');
   }
   const info = await checkForUpdate(current, { force: true });
-  if (!info.assetUrl) throw new Error('No downloadable build for this platform — use `npx @chatpanel/bridge`.');
-  if (!info.updateAvailable) {
-    throw new Error(info.latest ? `Already on the latest version (v${current}).` : 'Could not reach the update server.');
+  // A forced check that fell back to the cache has not checked anything. Acting on it is how
+  // an update reported success while installing a version that was already superseded, and how
+  // it later refused with "already on the latest version" while a newer one sat published.
+  // Say what actually happened and leave the binary alone.
+  if (info.stale) {
+    throw new Error(`Could not reach the update server${info.error ? ` (${info.error})` : ''}. `
+      + 'Refusing to act on a stale check — try again in a few minutes.');
   }
+  if (!info.assetUrl) throw new Error('No downloadable build for this platform — use `npx @chatpanel/bridge`.');
+  if (!info.updateAvailable) throw new Error(`Already on the latest version (v${current}).`);
 
   const target = process.execPath; // the running binary's own path
   const dir = path.dirname(target);
