@@ -36,6 +36,26 @@ export function foldEvent(state, ev) {
 }
 
 /**
+ * Fold one OpenAI-style chunk (what the gateway streams) into the same reply state, so a
+ * caller cannot tell which transport it has. Shares parseSse: `data: [DONE]` is not JSON and
+ * is dropped there, which is why the transport marks `done` itself when the stream ends.
+ */
+export function foldOpenAiEvent(state, ev) {
+  if (ev?.type === 'run') return { ...state, runId: ev.id || state.runId };
+  // An error can arrive as a streamed frame rather than an HTTP status.
+  if (ev?.error) return { ...state, done: true, error: ev.error.message || String(ev.error) };
+  const choice = ev?.choices?.[0];
+  let next = state;
+  const delta = choice?.delta?.content;
+  if (typeof delta === 'string' && delta) next = { ...next, text: next.text + delta };
+  // Non-streaming replies (a gateway destination that cannot stream) carry the whole message.
+  const whole = choice?.message?.content;
+  if (!next.text && typeof whole === 'string' && whole) next = { ...next, text: whole };
+  if (choice?.finish_reason) next = { ...next, done: true };
+  return next;
+}
+
+/**
  * Pull complete SSE events out of a growing buffer. Returns the parsed events and the
  * UNCONSUMED tail (a partial frame still arriving), which the caller prepends next read.
  */

@@ -24,7 +24,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // The service and everything under it. `config.js` is deliberately absent: it resolves paths
 // and reads the bridge token from disk, and the bridge already knows both.
 const FILES = [
-  'normalize.js', 'pairing.js', 'invoke.js', 'stream.js', 'bridge.js',
+  'normalize.js', 'pairing.js', 'invoke.js', 'stream.js', 'bridge.js', 'gateway.js',
   'eventlog.js', 'service.js', 'adapters/telegram.js',
 ];
 

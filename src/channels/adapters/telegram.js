@@ -46,6 +46,12 @@ export function startTelegram({
   savePairing = async () => {},
   appender,                    // createEventLog(...) or nullEventLog()
   agent = 'claude',
+  // Which transport answers, and with what. `bridge` runs a CLI agent on this machine;
+  // `gateway` reaches any destination the user configured there — an API provider or, via the
+  // gateway's own bridge backend, the same CLI agents. The adapter must not be able to tell
+  // which it has: both expose chat()/cancel() and fold into one reply state.
+  transport = bridge,
+  model = '',
   system = '',
   redact = { tier: 'basic' },
   privacy = 'standard',
@@ -113,7 +119,7 @@ export function startTelegram({
     }
     if (name === 'stop') {
       const st = chatState(norm.chatId);
-      const ok = await bridge.cancel(st.runId, { baseUrl, token });
+      const ok = await transport.cancel(st.runId, { baseUrl, token });
       st.runId = null;
       return void send(norm.chatId, ok ? '⏹ stopped.' : 'nothing running.');
     }
@@ -151,15 +157,16 @@ export function startTelegram({
     const messages = [...st.history, { role: 'user', content: redacted }];
 
     try {
-      const finalState = await bridge.chat(
-        { agent, system, messages, images, options: { reach } },
+      const finalState = await transport.chat(
+        { agent, model, system, messages, images, options: { reach } },
         {
           baseUrl, token, signal,
           onEvent: (ev, state) => {
-            if (ev.type === 'run') st.runId = state.runId;
-            // Throttled live edit: restore the user's own values + egress-scrub fresh secrets, so
-            // the user watches real text stream in but the provider never carries a leaked secret.
-            if ((ev.type === 'delta' || ev.type === 'done') && replyId && (ev.type === 'done' || gate.ready())) {
+            if (state.runId) st.runId = state.runId;
+            // Driven by the folded STATE, not by an event's `type`: the bridge emits
+            // {type:'delta'} and the gateway emits OpenAI chunks, and this has to work on both.
+            // The `first !== shown` guard below makes a no-text event a no-op anyway.
+            if (replyId && (state.done || gate.ready())) {
               const text = outboundText(state.text, st.vault, { privacy });
               const first = splitForTelegram(text || '…')[0];
               if (first && first !== shown) { shown = first; edit(norm.chatId, replyId, first).catch(() => {}); }

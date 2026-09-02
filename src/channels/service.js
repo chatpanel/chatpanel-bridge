@@ -27,11 +27,22 @@
 import path from 'node:path';
 import { readFile, writeFile, mkdir, rm, stat } from 'node:fs/promises';
 import { createPairingStore } from './pairing.js';
+import * as bridgeTransport from './bridge.js';
+import * as gateway from './gateway.js';
+
+// The gateway's fixed local port (see chatpanel-gateway: 4319 bridge / 4320 gateway).
+const DEFAULT_GATEWAY_URL = 'http://127.0.0.1:4320';
 import { createEventLog } from './eventlog.js';
 import { startTelegram } from './adapters/telegram.js';
 
 const TELEGRAM_API = 'https://api.telegram.org';
-export const DEFAULT_SETTINGS = Object.freeze({ agent: 'claude', privacy: 'standard', tier: 'basic' });
+// `agent` routes through the bridge (a CLI on this machine). `model` routes through the
+// gateway, which reaches every destination the user configured there — API providers AND, via
+// its own bridge backend, the same agents. They are mutually exclusive: update() clears one
+// when the other is set, because "which thing answers" is one choice, not two.
+export const DEFAULT_SETTINGS = Object.freeze({
+  agent: 'claude', model: '', gatewayUrl: DEFAULT_GATEWAY_URL, privacy: 'standard', tier: 'basic',
+});
 
 // Restart backoff. A long-poll that dies (network drop, laptop asleep, Telegram hiccup) must
 // come back on its own — a channel nobody is watching is exactly the one that must self-heal —
@@ -120,9 +131,13 @@ export function createChannelService({
   function spawnLoop(botToken) {
     controller = new AbortController();
     running = true;
+    // One choice, resolved here so the adapter never has to ask "which kind am I?".
+    const viaGateway = !!settings.model;
     const done = startAdapter({
       botToken,
-      baseUrl: bridge.baseUrl,
+      transport: viaGateway ? gateway : bridgeTransport,
+      model: viaGateway ? settings.model : '',
+      baseUrl: viaGateway ? (settings.gatewayUrl || DEFAULT_GATEWAY_URL) : bridge.baseUrl,
       token: bridge.token,
       pairing,
       savePairing,
@@ -232,7 +247,13 @@ export function createChannelService({
     async update(patch = {}) {
       await load();
       const next = { ...settings };
-      for (const k of ['agent', 'privacy', 'tier', 'system']) if (patch[k] != null) next[k] = patch[k];
+          for (const k of ['agent', 'model', 'gatewayUrl', 'privacy', 'tier', 'system']) {
+        if (patch[k] != null) next[k] = patch[k];
+      }
+      // Picking one target unpicks the other. Without this a stale `model` would silently win
+      // over the agent the user just chose, and the screen would disagree with the machine.
+      if (patch.agent != null && patch.model == null) next.model = '';
+      if (patch.model) next.agent = '';
       settings = next;
       await saveSettings();
       // Settings are read when the loop starts, so a change only lands on a restart.
@@ -273,7 +294,16 @@ export function createChannelService({
         bot: bot ? { ...bot } : null,
         error: lastError,
         paired: pairing.list(),
-        settings: { agent: settings.agent, privacy: settings.privacy, tier: settings.tier },
+        settings: {
+          agent: settings.agent,
+          model: settings.model || '',
+          gatewayUrl: settings.gatewayUrl || DEFAULT_GATEWAY_URL,
+          privacy: settings.privacy,
+          tier: settings.tier,
+        },
+        // Which transport a message will actually take, so a screen can say so rather than
+        // inferring it from two fields and getting it wrong.
+        via: settings.model ? 'gateway' : 'bridge',
       };
     },
   };
