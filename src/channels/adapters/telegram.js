@@ -99,7 +99,7 @@ export function startTelegram({
     // no six digits thumbed in from another screen. Bare /start is still the greeting.
     const pairCode = name === 'pair' || (name === 'start' && args) ? args : '';
     if (pairCode) {
-      const r = pairing.redeem(id, pairCode);
+      const r = pairing.redeem(id, pairCode, { label: norm.from?.name || '' });
       await savePairing();
       return void send(norm.chatId, r.ok
         ? `✅ paired (reach: ${r.reach}). Send me anything — I'll run it on your machine.`

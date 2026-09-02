@@ -23,6 +23,7 @@ import { summarizeCliError } from '../cli-errors.js';
 import { killOnAbort } from '../proc.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
 import { displayPath, resolveWorkdir } from '../workdir.js';
+import { connectorsFor } from '../connectors.js';
 
 // Write base64 data-URL images to temp files. Claude Code reads them with its
 // Read tool (which feeds images to the model as vision), so we just reference the
@@ -68,6 +69,44 @@ const CHANNEL_ALLOW = Object.freeze({
 // Belt-and-suspenders: the allow-list already omits these, but we also forbid them explicitly so
 // a capped turn can never reach shell, writes, or a network egress even via an MCP alias.
 const CHANNEL_DENY = Object.freeze(['Bash', 'Edit', 'Write', 'WebFetch', 'WebSearch']);
+
+// ChatPanel's OWN history/memory tools, which arrive as a user-configured MCP server rather
+// than as built-ins — so the tier's allow-list, which only ever named built-ins, left them out
+// and a headless channel turn had no way to approve them. The phone got "the search tools need
+// your permission and it hasn't been granted yet", which is the one question a texting-your-
+// machine product must never ask: nobody is at the keyboard.
+//
+// Granting them changes nothing about the posture. `trusted` already allows Read/Grep/Glob
+// across the machine, so reading the user's own meetings and notes is narrower than what is
+// already permitted, and egress stays cut — the only place an answer can go is the reply to the
+// phone that is already paired. The MUTATING half is a different question and stays denied: a
+// prompt-injected message must not be able to rewrite what the assistant remembers about you.
+const CHANNEL_MCP_READ = Object.freeze([
+  'search_history', 'smart_search', 'get_record', 'list_history', 'find_related', 'recall',
+  'list_skills', 'open_skill', 'read_skill_file',
+]);
+const CHANNEL_MCP_WRITE = Object.freeze(['remember', 'forget']);
+// Which tiers get the read half. `device` is "conversational only" and stays that way.
+const CHANNEL_MCP_BY_REACH = Object.freeze({ device: Object.freeze([]), trusted: CHANNEL_MCP_READ });
+
+/**
+ * `mcp__<server>__<tool>` entries for the ChatPanel MCP servers this agent actually has
+ * configured. Names come from the agent's own config (connectors.js) because the user chooses
+ * them — 'chatpanel', 'chatpanel-history', whatever they typed. Anything not matching is left
+ * alone: a capped turn must not be handed a stranger's MCP server because it was present.
+ */
+export function channelMcpTools(reach, connectors = []) {
+  const reads = CHANNEL_MCP_BY_REACH[reach] || CHANNEL_MCP_BY_REACH.device;
+  const servers = (connectors || []).filter((n) => typeof n === 'string' && /^chatpanel/i.test(n));
+  const allow = [];
+  const deny = [];
+  for (const server of servers) {
+    for (const tool of reads) allow.push(`mcp__${server}__${tool}`);
+    // Denied on every capped tier, including the ones that get no reads.
+    for (const tool of CHANNEL_MCP_WRITE) deny.push(`mcp__${server}__${tool}`);
+  }
+  return { allow, deny };
+}
 
 /**
  * Tool policy for a channel/remote caller. Returns { allow, deny } for a capped tier, or null
@@ -309,8 +348,11 @@ export async function chat({ messages, system, options, images }, emit, { signal
   // permissionMode behavior unchanged.
   const channelPolicy = channelToolPolicy(options.reach);
   if (channelPolicy) {
-    args.push('--allowedTools', ...channelPolicy.allow, ...mcpAllow);
-    args.push('--disallowedTools', ...channelPolicy.deny);
+    // Read from the agent's own config each turn rather than cached at boot: a server the user
+    // added five minutes ago should work on the next message, not the next restart.
+    const own = channelMcpTools(options.reach, await connectorsFor('claude').catch(() => []));
+    args.push('--allowedTools', ...channelPolicy.allow, ...mcpAllow, ...own.allow);
+    args.push('--disallowedTools', ...channelPolicy.deny, ...own.deny);
   }
   // Gate writes/shell behind the chosen mode; otherwise restrict to read-only
   // tools so headless runs never block on an approval prompt. The relayed browser

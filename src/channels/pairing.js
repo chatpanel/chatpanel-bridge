@@ -23,6 +23,17 @@ export { REACH };
 
 // 6 digits: enough entropy for a short-lived, single-use enrollment code shown on a screen,
 // short enough to thumb into a phone. It is NOT a password — it expires and burns on first use.
+// A display name from a remote platform is untrusted text that lands in the owner's settings
+// screen: strip control characters and bidi overrides (which can make one name render as
+// another), collapse whitespace, and cap it. The UI escapes too — this is the other half.
+function cleanLabel(value) {
+  return String(value || '')
+    .replace(/[\u0000-\u001f\u007f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 48);
+}
+
 function sixDigits(randomInt) {
   return String(randomInt(0, 1_000_000)).padStart(6, '0');
 }
@@ -55,20 +66,24 @@ export function createPairingStore(state = {}, {
       pending.set(code, { at: now(), ttlMs });
       return code;
     },
-    /** Phone-side: "/pair 123456". Burns the code and pairs the actor at 'trusted'. */
-    redeem(actorId, code, { reach = 'trusted' } = {}) {
+    /** Phone-side: "/pair 123456". Burns the code and pairs the actor at 'trusted'.
+     *  `label` is whatever the platform calls the person (a Telegram first name or @handle) —
+     *  stored so the owner's screen can say WHICH phone it just enrolled. An opaque
+     *  'telegram:789795542' is not something anyone can recognise, and the whole point of the
+     *  list is deciding whether to revoke one. Display only: authorization is by actorId. */
+    redeem(actorId, code, { reach = 'trusted', label = '' } = {}) {
       prune();
       const c = String(code || '').trim();
       if (!pending.has(c)) return { ok: false, reason: 'unknown or expired code' };
       if (!REACH.includes(reach)) return { ok: false, reason: `unknown reach '${reach}'` };
       pending.delete(c);
-      paired.set(actorId, { reach, at: now() });
+      paired.set(actorId, { reach, at: now(), label: cleanLabel(label) });
       return { ok: true, reach };
     },
     /** Bootstrap without a code — for an operator-supplied allow list. Explicit, not silent. */
-    allow(actorId, { reach = 'trusted' } = {}) {
+    allow(actorId, { reach = 'trusted', label = '' } = {}) {
       if (!REACH.includes(reach)) throw new Error(`unknown reach '${reach}'`);
-      paired.set(actorId, { reach, at: now() });
+      paired.set(actorId, { reach, at: now(), label: cleanLabel(label) });
     },
     revoke(actorId) { return paired.delete(actorId); },
     isPaired(actorId) { return paired.has(actorId); },
