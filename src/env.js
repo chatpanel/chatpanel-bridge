@@ -273,6 +273,52 @@ function stripBom(s) {
 
 // Version managers install CLIs under versioned bin dirs that a lazy-loaded
 // shell (nvm/fnm) doesn't export into a non-interactive service PATH. Add them.
+/**
+ * The node version nvm would actually give you, and only that one.
+ *
+ * WHY THIS EXISTS. PATH discovery asks a LOGIN shell, which never reads .zshrc — and .zshrc
+ * is where nvm lives. So the learned PATH has no nvm in it, and the hardcoded fallbacks
+ * below take over. Those start with /opt/homebrew/bin, so a Homebrew copy of an agent CLI
+ * beat the one the user's terminal uses.
+ *
+ * One machine had Claude Code 2.1.268 under nvm and 2.1.175 under Homebrew. Every turn
+ * through the bridge answered "Claude Code 2.1.175 does not support this model" to a user
+ * who had just updated Claude Code — twice.
+ *
+ * `versionManagerBins` cannot fix that on its own: it lists EVERY installed version, in
+ * directory order, so preferring it wholesale would pick an arbitrary old node. This picks
+ * the one nvm itself would: the `default` alias if it names a version, else the highest
+ * installed. Pure filesystem reads — no shell, so nothing can block startup.
+ */
+export function nvmCurrentBin(home = os.homedir(), env = process.env) {
+  const root = path.join(env.NVM_DIR || path.join(home, '.nvm'), 'versions', 'node');
+  let versions;
+  try {
+    versions = readdirSync(root).filter((v) => /^v\d+\./.test(v));
+  } catch {
+    return null;   // no nvm on this machine
+  }
+  if (!versions.length) return null;
+
+  const byVersion = (a, b) => {
+    const pa = a.slice(1).split('.').map(Number);
+    const pb = b.slice(1).split('.').map(Number);
+    for (let i = 0; i < 3; i += 1) if ((pa[i] || 0) !== (pb[i] || 0)) return (pb[i] || 0) - (pa[i] || 0);
+    return 0;
+  };
+
+  // The `default` alias is what a new shell resolves to. It may name a version directly
+  // ("24.14.0"), or point at another alias ("lts/*"), which we do not chase — the highest
+  // installed is a better guess than a wrong one.
+  try {
+    const alias = readFileSync(path.join(env.NVM_DIR || path.join(home, '.nvm'), 'alias', 'default'), 'utf8').trim();
+    const want = alias.startsWith('v') ? alias : `v${alias}`;
+    if (versions.includes(want)) return path.join(root, want, 'bin');
+  } catch { /* no alias file — fall through */ }
+
+  return path.join(root, versions.sort(byVersion)[0], 'bin');
+}
+
 function versionManagerBins(home) {
   const bins = [];
   const tryDir = (dir, sub) => {
@@ -501,7 +547,12 @@ export function enrichPath() {
     return;
   }
 
+  const nvmBin = nvmCurrentBin(home);
   const common = [
+    // BEFORE the package-manager dirs. A version manager PREPENDS itself to PATH in the
+    // user's shell, so its copy is the one their terminal runs — and the whole purpose of
+    // this list is to reproduce what the terminal would do.
+    ...(nvmBin ? [nvmBin] : []),
     '/opt/homebrew/bin',
     '/opt/homebrew/sbin',
     '/usr/local/bin',
@@ -523,6 +574,12 @@ export function enrichPath() {
   let shellPath = '';
   try {
     const shell = process.env.SHELL || '/bin/zsh';
+    // `-lc`, NOT `-ilc`, and deliberately: an INTERACTIVE shell can block on a prompt and
+    // hang the daemon's own startup. tests/env-startup.test.mjs holds that line.
+    //
+    // The cost is that a login shell does not read .zshrc/.bashrc, which is where nvm and
+    // friends install themselves — so this answer arrives WITHOUT the version manager, and
+    // the merge below has to supply it. See nvmCurrentBin().
     const r = spawnSync(shell, ['-lc', 'command -p echo "$PATH"'], {
       encoding: 'utf8',
       timeout: 4000,
@@ -534,6 +591,17 @@ export function enrichPath() {
 
   const seen = new Set();
   const merged = [
+    // THE VERSION MANAGER GOES FIRST, ahead even of the login shell's own answer.
+    //
+    // That looks aggressive until you see why the shell's answer is incomplete: `-lc` never
+    // reads .zshrc, which is where nvm installs itself, so the PATH we learn is the user's
+    // MINUS their version manager — while still containing /opt/homebrew/bin from .zprofile.
+    // Merging it first therefore hands Homebrew the win over a tool the user manages with
+    // nvm, which is the opposite of what their terminal does: nvm PREPENDS.
+    //
+    // So we put it back where nvm would have. `nvmCurrentBin` resolves the one version nvm
+    // itself would pick, from the filesystem, with no shell to block on.
+    ...(nvmBin ? [nvmBin] : []),
     ...(shellPath ? shellPath.split(':') : []),
     ...(process.env.PATH ? process.env.PATH.split(path.delimiter) : []),
     ...common,
