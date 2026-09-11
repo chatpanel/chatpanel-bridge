@@ -30,6 +30,46 @@ import { stripHidden, confusablesSkeleton } from './sanitize.js';
 
 const TOKEN_RE = /\[\[([A-Z][A-Z0-9]*)_(\d+)\]\]/g;
 
+/**
+ * THE TOKEN FORMAT, PUBLISHED — because `[[TYPE_n]]` collides with `[[wikilink]]`.
+ *
+ * The placeholder grammar was chosen to be visually obvious in a prompt, and it is
+ * character-for-character the wikilink syntax notes and briefs use. So `[[PERSON_1]]` in a
+ * stored message reads as a link to a page called "PERSON_1", and downstream that became a
+ * backlink, a graph node, and a subject with its own page. The name of a person we
+ * deliberately did not learn was being filed as a thing we know about.
+ *
+ * A placeholder is the ABSENCE of an identity. It must never become a link, a subject, a tag
+ * or a topic — and it must never be restored into anything derived and persisted, because
+ * that would put the PII back on disk in a second place.
+ *
+ * Exported rather than left private so consumers ASK instead of re-deriving the pattern:
+ * this package owns the format, and `CLAUDE.md` lists it as a wire contract that only
+ * changes additively.
+ */
+export const REDACTION_TOKEN_TYPES = Object.freeze([
+  'PERSON', 'ORG', 'LOCATION', 'ADDRESS', 'EMAIL', 'PHONE', 'ID', 'SSN', 'IBAN',
+  'CREDITCARD', 'CARD', 'POST', 'FAC', 'GROUP', 'NRP', 'ENTITY', 'KEY', 'SECRET',
+  'TERM', 'PII', 'OTHER',
+]);
+
+/**
+ * Is this bare string one of OUR placeholders?
+ *
+ * Matched against the known type vocabulary rather than the bare `[A-Z]+_\d+` shape, and
+ * that holds even inside brackets: `[[Q3_2026]]` and `[[PHASE_2]]` are links people
+ * genuinely write, so a shape test would trade one invisible bug for another. A custom
+ * dictionary type is the accepted gap — it is user-chosen, so a downstream consumer filing
+ * it is a name the user picked, not a stranger's identity.
+ *
+ * Bracket-tolerant: callers ask both before and after a wikilink parser has stripped them.
+ */
+export function isRedactionToken(value) {
+  const bare = String(value ?? '').trim().replace(/^\[{1,2}|\]{1,2}$/g, '');
+  const m = /^([A-Z][A-Z0-9]*)_\d+$/.exec(bare);
+  return !!m && REDACTION_TOKEN_TYPES.includes(m[1]);
+}
+
 // Bracket-TOLERANT match of the same token. Smaller models routinely drop or mangle
 // the [[ ]] when echoing a placeholder into tool-call JSON — e.g. they emit "ORG_1"
 // or "[ORG_1]" instead of "[[ORG_1]]" — which the strict TOKEN_RE misses, leaving
@@ -345,6 +385,37 @@ export function restoreWithAliases(text, vault) {
     }
   }
   return out;
+}
+
+/**
+ * THE LAST LINE BEFORE A HUMAN READS IT.
+ *
+ * `restoreText` undoes what a given vault minted. This asks the harder question a UI has to
+ * answer: is there ANY placeholder left in what I am about to show? A reply is redacted for
+ * the model's benefit, never the reader's — so a token reaching the screen is always a bug,
+ * and one that is invisible to the code that caused it, because by then the turn is over.
+ *
+ * It exists because a turn can mint tokens in one vault and be restored against another (or
+ * against none): a local agent under "redact for remote only" gets no vault at all, while
+ * tool results reaching it may already carry placeholders from somewhere else. Every one of
+ * those paths ends at the same render call, so the check belongs there.
+ *
+ * Returns `{ text, unresolved }` — restored where the vault knows the token, and the list of
+ * the ones it could not, so the caller can decide (mask, warn, log) rather than silently
+ * shipping `[[PERSON_5]]` to a person reading about their own colleagues.
+ */
+export function scrubPlaceholders(text, vault) {
+  const src = String(text ?? '');
+  if (!src) return { text: src, unresolved: [] };
+  const unresolved = [];
+  const out = src.replace(TOKEN_RE, (match) => {
+    const value = vault?.byToken?.get(match);
+    if (value != null) return value;
+    unresolved.push(match);
+    return match;
+  });
+  TOKEN_RE.lastIndex = 0;
+  return { text: out, unresolved };
 }
 
 // True if the text still contains any redaction placeholder (useful for streaming
