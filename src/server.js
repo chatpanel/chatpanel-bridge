@@ -67,7 +67,7 @@ import {
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.11.11';
+const VERSION = '0.11.12';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -445,6 +445,9 @@ async function handleHealth(res) {
   json(res, 200, {
     ok: true, version: VERSION, agents, update,
     workspace: DEFAULT_WORKSPACE,
+    // WHO STARTED THIS PROCESS — additive. ChatPanel Desktop sets CHATPANEL_MANAGED_BY=desktop on
+    // the login service it registers; a client can then say so instead of offering install.sh.
+    ...(process.env.CHATPANEL_MANAGED_BY ? { managedBy: String(process.env.CHATPANEL_MANAGED_BY).slice(0, 32) } : {}),
     ...(skills ? { skills } : {}),
   });
 }
