@@ -62,3 +62,36 @@ test('assistant text streams once, not twice', () => {
   ]);
   assert.equal(out.filter((e) => e.type === 'delta').length, 1, 'the assistant echo is not re-emitted');
 });
+
+// Claude Code narrates, acts, then answers — two assistant messages. Glued together they read
+// "…writing the table.> Assuming", with the answer's blockquote marker stuck to the narration.
+test('text after a tool call starts a new paragraph, unless the previous text already ended one', () => {
+  const runFlow = (msgs) => {
+    const out = [];
+    const flow = { sawText: false, tail: '', boundary: false };
+    let streamed = false;
+    for (const m of msgs) {
+      const r = handleMessage(m, (e) => out.push(e), streamed, '', flow);
+      if (r.streamed) streamed = true;
+    }
+    return out.filter((e) => e.type === 'delta').map((e) => e.text).join('');
+  };
+  const delta = (text) => ({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text } } });
+  const tool = { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tu_1', name: 'Read', input: {} }] } };
+  const result = { type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: 'ok' }] } };
+
+  assert.equal(runFlow([delta("I'll check the catalog before writing the table."), tool, result, delta('> Assuming X'), delta(' = Y')]),
+    "I'll check the catalog before writing the table.\n\n> Assuming X = Y");
+  assert.equal(runFlow([delta('First.\n\n'), tool, result, delta('Second.')]), 'First.\n\nSecond.', 'no double break when one is already there');
+  assert.equal(runFlow([tool, result, delta('Only answer.')]), 'Only answer.', 'nothing to separate from');
+  assert.equal(runFlow([delta('One'), delta(' two')]), 'One two', 'deltas inside one text are untouched');
+});
+
+test('without a flow object the old behaviour holds — the custom engine passes none', () => {
+  const out = run([
+    { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'a.' } } },
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 't', name: 'Read', input: {} }] } },
+    { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'b' } } },
+  ]);
+  assert.equal(out.filter((e) => e.type === 'delta').map((e) => e.text).join(''), 'a.b');
+});

@@ -189,6 +189,7 @@ function runClaude({ prompt, args, cwd, emit, signal }) {
     let stdout = '';
     let stderr = '';
     let streamedAny = false;
+    const flow = { sawText: false, tail: '', boundary: false };
     let resultText = '';
 
     let idleTimer;
@@ -215,7 +216,7 @@ function runClaude({ prompt, args, cwd, emit, signal }) {
         } catch {
           continue; // not a JSON event line
         }
-        const r = handleMessage(msg, emit, streamedAny, cwd);
+        const r = handleMessage(msg, emit, streamedAny, cwd, flow);
         if (r.streamed) streamedAny = true;
         if (r.result != null) resultText = r.result;
       }
@@ -254,14 +255,35 @@ function toolResultText(content) {
 // Map one stream-json message to emit() calls. Returns { streamed, result }.
 // The CLI's stream-json mirrors the SDK message shapes. Exported so the custom
 // engine can reuse it for agents that emit Claude-style stream-json.
-export function handleMessage(msg, emit, alreadyStreamed, cwdForSteps = '') {
+// WHERE ONE TEXT ENDS AND THE NEXT BEGINS. Claude Code narrates before it acts ("I'll check the
+// catalog first…"), calls its tools, then answers — two assistant messages, both streamed as
+// text deltas. Concatenated as they arrive they read "…writing the table.> Assuming", and a
+// note or a chat bubble shows the blockquote marker glued to the previous sentence. `flow`
+// (one object per run, passed by the caller) remembers how the last text ended and whether a
+// tool call happened since; the next text after a tool call gets a paragraph break unless the
+// previous text already ended with one. A caller that passes no `flow` gets the old
+// behaviour — the custom engine reuses this and does not need it.
+function textBoundary(flow, emit) {
+  if (!flow) return;
+  if (flow.boundary && flow.sawText && !/\n$/.test(flow.tail)) emit({ type: 'delta', text: '\n\n' });
+  flow.boundary = false;
+}
+function noteText(flow, text) {
+  if (!flow || !text) return;
+  flow.sawText = true;
+  flow.tail = text.slice(-2);
+}
+
+export function handleMessage(msg, emit, alreadyStreamed, cwdForSteps = '', flow = null) {
   const out = { streamed: false, result: null };
   if (msg.type === 'stream_event') {
     const ev = msg.event;
     if (ev?.type === 'content_block_delta') {
       if (ev.delta?.type === 'text_delta') {
         out.streamed = true;
+        textBoundary(flow, emit);
         emit({ type: 'delta', text: ev.delta.text });
+        noteText(flow, ev.delta.text);
       } else if (ev.delta?.type === 'thinking_delta') {
         emit({ type: 'reasoning', text: ev.delta.thinking || '' });
       }
@@ -269,6 +291,7 @@ export function handleMessage(msg, emit, alreadyStreamed, cwdForSteps = '') {
   } else if (msg.type === 'assistant') {
     for (const block of msg.message?.content || []) {
       if (block.type === 'tool_use') {
+        if (flow) flow.boundary = true;
         // PHASE-BASED, like the Codex engine: the panel renders a step with the call's
         // arguments and then fills in its status and output when the result arrives. The old
         // single `summary` event produced one anonymous line per call and no outcome — you
@@ -281,7 +304,9 @@ export function handleMessage(msg, emit, alreadyStreamed, cwdForSteps = '') {
         });
       } else if (block.type === 'text' && !alreadyStreamed) {
         out.streamed = true;
+        textBoundary(flow, emit);
         emit({ type: 'delta', text: block.text });
+        noteText(flow, block.text);
       }
     }
   } else if (msg.type === 'user') {
@@ -476,6 +501,8 @@ async function sdkChat({ messages, system, options }, emit, { signal } = {}) {
       : { behavior: 'deny', message: `${toolName} blocked — set this agent's permission mode in ChatPanel to enable it.` };
 
   let streamedAny = false;
+
+  const flow = { sawText: false, tail: '', boundary: false };
   let resultText = '';
   const iterator = query({
     prompt: buildCliPrompt(messages),
@@ -495,7 +522,7 @@ async function sdkChat({ messages, system, options }, emit, { signal } = {}) {
   });
   try {
     for await (const message of iterator) {
-      const r = handleMessage(message, emit, streamedAny, cwd);
+      const r = handleMessage(message, emit, streamedAny, cwd, flow);
       if (r.streamed) streamedAny = true;
       if (r.result != null) resultText = r.result;
     }
