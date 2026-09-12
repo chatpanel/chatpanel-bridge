@@ -99,3 +99,16 @@ test('todo_list → the plan as one status, only when it changes; error → a st
   forwardEvent({ type: 'item.completed', item: { id: 'e', type: 'error', message: 'rate limited' } }, emit, state);
   assert.equal(out[1].text, 'Codex: rate limited');
 });
+
+test('the managed-requirements warning is said once, in a sentence, and remembered', () => {
+  const state = { started: new Set(), reasoned: new Set(), n: 0 };
+  const out = [];
+  const emit = (o) => out.push(o);
+  const msg = 'Configured value for `approval_policy` is disallowed by requirements; falling back to required value OnRequest. Details: invalid value for `approval_policy`: `Never` is not in the allowed set [OnRequest, UnlessTrusted] (set by enterprise-managed requirements)';
+  forwardEvent({ type: 'error', message: msg }, emit, state);
+  forwardEvent({ type: 'item.completed', item: { id: 'e', type: 'error', message: msg } }, emit, state);
+  assert.equal(out.length, 1, 'said once');
+  assert.match(out[0].text, /your organisation pins approval_policy/);
+  assert.doesNotMatch(out[0].text, /enterprise-managed|Details:/, 'the paragraph is gone');
+  assert.equal(state.policyBlocked, true, 'remembered, so the next run stops passing the flag');
+});

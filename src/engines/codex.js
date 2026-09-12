@@ -39,6 +39,11 @@ const REASONING = process.env.CHATPANEL_CODEX_EFFORT ?? 'low'; // '' → respect
 // straight from that file, plus a few common ids. The picker still accepts any
 // free-text value, so an out-of-date curated entry is harmless.
 const CODEX_KNOWN = ['gpt-5-codex', 'gpt-5', 'o3', 'o4-mini'];
+// Set once Codex has reported that its managed requirements forbid approval_policy=never;
+// cleared only by a bridge restart, which is when a policy could plausibly have changed.
+let approvalPolicyBlocked = false;
+export function resetApprovalPolicy() { approvalPolicyBlocked = false; }
+
 export async function listModels() {
   const set = new Set();
   try {
@@ -234,7 +239,7 @@ function runCodex({ args, cwd, env, prompt, outFile, emit, signal }) {
         /* no message file */
       }
       unlink(outFile).catch(() => {});
-      resolve({ code, stderr, text, streamed });
+      resolve({ code, stderr, text, streamed, policyBlocked: !!evState.policyBlocked });
     });
 
     child.stdin.write(prompt);
@@ -265,7 +270,11 @@ export async function chat({ messages, system, options, images }, emit, { signal
       args.push('--dangerously-bypass-approvals-and-sandbox');
     } else {
       const sandbox = options.permissionMode === 'acceptEdits' ? 'workspace-write' : 'read-only';
-      args.push('-s', sandbox, '-c', 'approval_policy=never');
+      args.push('-s', sandbox);
+      // `never` is what a headless run needs — but an organisation can pin approval_policy
+      // through Codex's managed requirements, and then every turn opened with a paragraph
+      // of warning and fell back to OnRequest anyway. Once Codex has said so, stop asking.
+      if (!approvalPolicyBlocked) args.push('-c', 'approval_policy=never');
     }
     if (REASONING) args.push('-c', `model_reasoning_effort=${REASONING}`);
     // Ask Codex to emit reasoning SUMMARIES so the panel can stream the model's thinking.
@@ -303,6 +312,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
 
   try {
     let result = await attempt();
+    if (result.policyBlocked) approvalPolicyBlocked = true;
 
     // The failure this exists for: one of the user's OWN MCP servers could not authenticate
     // or could not be reached, and took a turn with it that never needed that server. Drop it
@@ -418,8 +428,19 @@ export function forwardEvent(ev, emit, state = { started: new Set(), reasoned: n
   }
 
   if (itype === 'error' || t === 'error') {
-    const msg = item.message || ev.message || '';
-    if (msg) emit({ type: 'status', text: `Codex: ${String(msg).slice(0, 300)}` });
+    const msg = String(item.message || ev.message || '');
+    if (!msg) return;
+    // The managed-requirements warning: long, per turn, and about a flag WE pass. Say it
+    // once in a sentence, and remember (see buildArgs) so the next turn does not earn it.
+    if (/approval_policy.*(disallowed|not in the allowed set)/i.test(msg)) {
+      state.policyBlocked = true;
+      if (!state.policyNoted) {
+        state.policyNoted = true;
+        emit({ type: 'status', text: 'Codex: your organisation pins approval_policy, so Codex will ask before actions it cannot run on its own. ChatPanel will stop passing its own setting.' });
+      }
+      return;
+    }
+    emit({ type: 'status', text: `Codex: ${msg.slice(0, 300)}` });
     return;
   }
 
