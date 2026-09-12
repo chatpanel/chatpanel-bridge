@@ -113,10 +113,15 @@ export async function checkForUpdate(current, { force = false } = {}) {
     error = lastFailure.error;
     fallBackToCache();
   } else {
+    // An explicit timer, not AbortSignal.timeout: that one's timer is unref'd, so in a
+    // process with nothing else to do (a test, a CLI one-shot) the loop can exit before it
+    // fires and the fetch is neither answered nor abandoned.
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
     try {
       const res = await fetch(LATEST_API, {
         headers: { Accept: 'application/vnd.github+json', ...UA },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        signal: ctl.signal,
       });
       if (res.ok) {
         const data = await res.json();
@@ -130,11 +135,13 @@ export async function checkForUpdate(current, { force = false } = {}) {
         fallBackToCache();
       }
     } catch (e) {
-      error = e?.name === 'TimeoutError' || e?.name === 'AbortError'
+      error = ctl.signal.aborted
         ? `GitHub did not answer within ${Math.round(FETCH_TIMEOUT_MS / 1000)}s`
         : e?.message || String(e);
       lastFailure = { at: Date.now(), error };
       fallBackToCache();
+    } finally {
+      clearTimeout(timer);
     }
   }
   const updateAvailable = !!latest && cmp(latest, current) > 0;
