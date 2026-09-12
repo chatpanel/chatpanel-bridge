@@ -55,3 +55,47 @@ test('turn/thread start → a working status; no crash on empty events', () => {
   assert.deepEqual(run([{ type: 'turn.started' }]), [{ type: 'status', text: 'Codex working' }]);
   assert.deepEqual(run([{}]), []);
 });
+
+test('web_search → a web_search step; the query arrives only at completion (codex-cli 0.154 capture)', () => {
+  // The turn that showed the gap: a weekend-weather question searched the web four times,
+  // the CLI printed "Searching the web" each time, and the panel showed nothing at all.
+  const id = 'exec-598da690-85c3-4ca2-b672-afa501c3dbc9';
+  const out = run([
+    { type: 'item.started', item: { id, type: 'web_search', query: '', action: { type: 'other' } } },
+    { type: 'item.completed', item: { id, type: 'web_search', query: 'Issaquah WA weather forecast September 12 13 2026 weekend', action: { type: 'search', query: 'Issaquah WA weather forecast September 12 13 2026 weekend' } } },
+  ]);
+  assert.equal(out.length, 2);
+  assert.deepEqual(out[0], { type: 'tool', name: 'web_search', phase: 'start', callId: id, input: { query: '' } });
+  assert.equal(out[1].phase, 'done');
+  assert.equal(out[1].status, 'ok');
+  assert.match(out[1].result, /Searched the web for Issaquah WA weather/);
+  // An open_page action names the url.
+  const opened = run([{ type: 'item.completed', item: { id: 'w2', type: 'web_search', query: '', action: { type: 'open_page', url: 'https://forecast.weather.gov/x' } } }]);
+  assert.deepEqual(opened[0].input, { query: '', url: 'https://forecast.weather.gov/x' });
+  assert.equal(opened[1].result, 'Opened https://forecast.weather.gov/x');
+});
+
+test('mcp_tool_call → a step named server/tool with its arguments, result or error', () => {
+  const out = run([
+    { type: 'item.started', item: { id: 'm1', type: 'mcp_tool_call', server: 'chatpanel', tool: 'search_history', arguments: { query: 'demo' }, status: 'in_progress' } },
+    { type: 'item.completed', item: { id: 'm1', type: 'mcp_tool_call', server: 'chatpanel', tool: 'search_history', arguments: { query: 'demo' }, result: { content: [{ type: 'text', text: '3 results' }] }, status: 'completed' } },
+  ]);
+  assert.deepEqual(out[0], { type: 'tool', name: 'chatpanel/search_history', phase: 'start', callId: 'm1', input: { query: 'demo' } });
+  assert.equal(out[1].status, 'ok');
+  assert.match(out[1].result, /3 results/);
+  const failed = run([{ type: 'item.completed', item: { id: 'm2', type: 'mcp_tool_call', server: 'jira', tool: 'get_issue', arguments: {}, error: { message: 'not found' }, status: 'failed' } }]);
+  assert.equal(failed[1].status, 'error: not found');
+});
+
+test('todo_list → the plan as one status, only when it changes; error → a status line', () => {
+  const state = { started: new Set(), reasoned: new Set(), n: 0 };
+  const out = [];
+  const emit = (o) => out.push(o);
+  const items = [{ text: 'search', completed: true }, { text: 'answer', completed: false }];
+  forwardEvent({ type: 'item.updated', item: { id: 't', type: 'todo_list', items } }, emit, state);
+  forwardEvent({ type: 'item.updated', item: { id: 't', type: 'todo_list', items } }, emit, state);
+  assert.equal(out.length, 1);
+  assert.match(out[0].text, /☑ search\n☐ answer/);
+  forwardEvent({ type: 'item.completed', item: { id: 'e', type: 'error', message: 'rate limited' } }, emit, state);
+  assert.equal(out[1].text, 'Codex: rate limited');
+});

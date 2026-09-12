@@ -46,6 +46,58 @@ export async function listModels() {
   }
 }
 
+export const newAgyState = () => ({ started: new Set(), finalText: '' });
+
+// Translate one `agy --output-format stream-json` line into the bridge's streaming
+// vocabulary. Schema, captured from agy 1.2.2:
+//   {event:'init', init:{cwd, tools:[…]}}
+//   {event:'step_update', step_update:{ step_index, state:'ACTIVE'|'DONE',
+//       step_type:'user_input'|'agent_response'|'tool', text_delta?, tool_name?,
+//       tool_info:{ name, parameters, output? }, usage? }}
+//   {event:'result', result:{ status:'SUCCESS', response, usage }}
+// Returns { streamed } — whether a piece of the ANSWER went out (tool activity does not
+// count, so a run that only ran tools still gets its final text from `result`).
+export function forwardAgyLine(line, emit, state = newAgyState()) {
+  const t = String(line || '').trim();
+  if (!t) return { streamed: false };
+  let ev;
+  try { ev = JSON.parse(t); } catch {
+    // Not JSON: the CLI printed something for a human (a warning, a banner). Show it.
+    emit({ type: 'delta', text: `${t}\n` });
+    return { streamed: true };
+  }
+  const kind = ev.event || ev.type || '';
+  if (kind === 'init') { emit({ type: 'status', text: 'Antigravity working' }); return { streamed: false }; }
+  if (kind === 'result') {
+    const res = ev.result || {};
+    state.finalText = typeof res.response === 'string' ? res.response : '';
+    if (res.status && res.status !== 'SUCCESS') emit({ type: 'status', text: `Antigravity: ${res.status}` });
+    return { streamed: false };
+  }
+  if (kind !== 'step_update') return { streamed: false };
+  const st = ev.step_update || {};
+  if (st.step_type === 'tool') {
+    const id = `agy_${st.step_index ?? state.started.size}`;
+    const info = st.tool_info && typeof st.tool_info === 'object' ? st.tool_info : {};
+    const name = st.tool_name || info.name || 'tool';
+    if (!state.started.has(id)) {
+      state.started.add(id);
+      emit({ type: 'tool', name, phase: 'start', callId: id, input: info.parameters && typeof info.parameters === 'object' ? info.parameters : {} });
+    }
+    if (st.state === 'DONE') {
+      const failed = !!info.error || st.state === 'ERROR';
+      const output = info.output == null ? '' : typeof info.output === 'string' ? info.output : JSON.stringify(info.output);
+      emit({ type: 'tool', name, phase: 'done', callId: id, status: failed ? `error: ${String(info.error || 'failed').slice(0, 80)}` : 'ok', result: String(failed ? info.error || '' : output).slice(0, 4000) });
+    }
+    return { streamed: false };
+  }
+  if (st.step_type === 'agent_response' && typeof st.text_delta === 'string' && st.text_delta) {
+    emit({ type: 'delta', text: st.text_delta });
+    return { streamed: true };
+  }
+  return { streamed: false };
+}
+
 let installed = false;
 let lastProbe = 0;
 export async function available() {
@@ -99,18 +151,23 @@ export async function chat({ messages, system, options, images }, emit, { signal
   // `-p` runs one prompt non-interactively. --model picks the model.
   // --dangerously-skip-permissions auto-approves tool use (headless has no human
   // approver) only when the user opted into bypassPermissions.
-  const args = ['-p', prompt];
-  if (options.model) args.push('--model', options.model);
-  if (options.permissionMode === 'bypassPermissions') args.push('--dangerously-skip-permissions');
+  const baseArgs = ['-p', prompt];
+  if (options.model) baseArgs.push('--model', options.model);
+  if (options.permissionMode === 'bypassPermissions') baseArgs.push('--dangerously-skip-permissions');
   // Drop caller extras that would auto-approve tools (shared sanitizer).
-  pushExtraArgs(args, options.extraArgs, FORBIDDEN.antigravity, emit);
+  pushExtraArgs(baseArgs, options.extraArgs, FORBIDDEN.antigravity, emit);
 
-  await new Promise((resolve, reject) => {
+  // STRUCTURED OUTPUT FIRST. agy 1.2+ streams `--output-format stream-json`: one NDJSON
+  // event per line, with every tool step's name, parameters and output. Plain text — which
+  // is all this engine ever read — has no tools in it at all, so a turn that ran six
+  // commands showed the panel one answer and nothing else. An older agy that does not know
+  // the flag exits non-zero naming it; we fall back to text once, out loud.
+  const run = (structured) => new Promise((resolve, reject) => {
+    const args = structured ? [...baseArgs, '--output-format', 'stream-json'] : baseArgs;
     let child;
     try {
       child = spawn('agy', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env }, ...spawnGroupOpts });
     } catch (e) {
-      cleanup();
       return reject(new Error(`Failed to start agy: ${e.message}`));
     }
 
@@ -118,44 +175,62 @@ export async function chat({ messages, system, options, images }, emit, { signal
 
     let out = '';
     let err = '';
+    let buf = '';
     let streamed = false;
+    const state = newAgyState();
     let idleTimer;
     const armIdle = () => {
       clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
         child.kill('SIGKILL');
-        cleanup();
         reject(new Error(`Antigravity timed out — no output for ${Math.round(IDLE_MS / 1000)}s.`));
       }, IDLE_MS);
     };
     armIdle();
 
+    const forward = (line) => {
+      const r = forwardAgyLine(line, emit, state);
+      if (r.streamed) streamed = true;
+    };
     child.stdout.on('data', (d) => {
       armIdle();
       const s = d.toString();
       out += s;
-      streamed = true;
-      emit({ type: 'delta', text: s });
+      if (!structured) { streamed = true; emit({ type: 'delta', text: s }); return; }
+      buf += s;
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        forward(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+      }
     });
     child.stderr.on('data', (d) => { armIdle(); err += d.toString(); });
     child.on('error', (e) => {
       clearTimeout(idleTimer);
       detach();
-      cleanup();
       reject(new Error(`Failed to start agy: ${e.message}`));
     });
     child.on('close', (code) => {
       clearTimeout(idleTimer);
       detach();
-      cleanup();
-      if (signal?.aborted) { resolve(); return; } // Stop pressed — end quietly
-      if (code === 0) {
-        if (!streamed) emit({ type: 'delta', text: out.trim() || '(no output)' });
-        emit({ type: 'done', text: '' });
-        resolve();
-      } else {
-        reject(new Error(summarizeCliError('Antigravity', code, err, out)));
-      }
+      if (signal?.aborted) { resolve({ code: 0, aborted: true }); return; } // Stop pressed — end quietly
+      if (structured && buf.trim()) forward(buf);
+      resolve({ code, out, err, streamed, state });
     });
   });
+
+  try {
+    let r = await run(true);
+    if (r.aborted) return;
+    if (r.code !== 0 && !r.streamed && /output-format|unknown flag|flag provided but not defined/i.test(r.err)) {
+      emit({ type: 'status', text: 'This Antigravity CLI has no structured output; showing its text only. Update it with `agy update` to see tool activity.' });
+      r = await run(false);
+      if (r.aborted) return;
+    }
+    if (r.code !== 0) throw new Error(summarizeCliError('Antigravity', r.code, r.err, r.out));
+    if (!r.streamed) emit({ type: 'delta', text: (r.state?.finalText || r.out).trim() || '(no output)' });
+    emit({ type: 'done', text: '' });
+  } finally {
+    cleanup();
+  }
 }

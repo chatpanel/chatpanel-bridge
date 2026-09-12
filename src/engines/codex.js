@@ -334,6 +334,9 @@ export async function chat({ messages, system, options, images }, emit, { signal
 //   reasoning:         { id, text }            (only some models/efforts emit it)
 //   file_change:       { id, changes:[{path}] }
 //   agent_message:     { id, text }            (the answer — read from -o outFile at close)
+//   web_search:        { id, query, action:{ type, query?, url? } }   (codex-cli 0.154)
+//   mcp_tool_call:     { id, server, tool, arguments, result?, error?, status }
+//   todo_list:         { id, items:[{ text, completed }] }
 export function forwardEvent(ev, emit, state = { started: new Set(), reasoned: new Set(), n: 0 }) {
   const t = ev.type || '';
   const item = ev.item || {};
@@ -365,6 +368,58 @@ export function forwardEvent(ev, emit, state = { started: new Set(), reasoned: n
       emit({ type: 'tool', name: 'edit', phase: 'start', callId: id, input: { files } });
     }
     if (completed) emit({ type: 'tool', name: 'edit', phase: 'done', callId: id, status: 'ok' });
+    return;
+  }
+
+  // WEB SEARCH — Codex's own, not a command and not an MCP call, so it never reached the
+  // panel: a weekend-weather turn that searched four times showed no activity at all while
+  // the CLI printed "Searching the web" four times. Captured from codex-cli 0.154:
+  //   item.started   { id, type:'web_search', query:'', action:{ type:'other' } }
+  //   item.completed { id, type:'web_search', query, action:{ type:'search', query } }
+  // (the query is only known at completion; an `open_page` action carries a url instead).
+  if (itype === 'web_search') {
+    const id = item.id || `ws_${state.n++}`;
+    const action = item.action && typeof item.action === 'object' ? item.action : {};
+    const query = item.query || action.query || '';
+    const url = action.url || '';
+    if (!state.started.has(id)) {
+      state.started.add(id);
+      emit({ type: 'tool', name: 'web_search', phase: 'start', callId: id, input: { query, ...(url ? { url } : {}) } });
+    }
+    if (completed || t === 'item.completed') {
+      emit({ type: 'tool', name: 'web_search', phase: 'done', callId: id, status: 'ok', result: url ? `Opened ${url}` : query ? `Searched the web for ${query}` : 'Searched the web' });
+    }
+    return;
+  }
+
+  // MCP TOOL CALLS — the user's own servers, and ChatPanel's page tools relayed through the
+  // bridge. { id, server, tool, arguments, result?, error?, status }.
+  if (itype === 'mcp_tool_call') {
+    const id = item.id || `mcp_${state.n++}`;
+    const name = item.server ? `${item.server}/${item.tool || 'tool'}` : (item.tool || 'mcp');
+    if (!state.started.has(id)) {
+      state.started.add(id);
+      emit({ type: 'tool', name, phase: 'start', callId: id, input: item.arguments && typeof item.arguments === 'object' ? item.arguments : {} });
+    }
+    if (completed) {
+      const failed = item.status === 'failed' || item.error != null;
+      const err = item.error && typeof item.error === 'object' ? (item.error.message || JSON.stringify(item.error)) : item.error;
+      const res = item.result == null ? '' : typeof item.result === 'string' ? item.result : JSON.stringify(item.result);
+      emit({ type: 'tool', name, phase: 'done', callId: id, status: failed ? `error: ${String(err || 'failed').slice(0, 80)}` : 'ok', result: String(failed ? err || '' : res).slice(0, 4000) });
+    }
+    return;
+  }
+
+  // A plan Codex wrote for itself, shown once when it changes.
+  if (itype === 'todo_list' && Array.isArray(item.items) && item.items.length) {
+    const text = item.items.map((x) => `${x.completed ? '☑' : '☐'} ${x.text || ''}`).join('\n');
+    if (state.lastTodo !== text) { state.lastTodo = text; emit({ type: 'status', text: `Plan:\n${text}` }); }
+    return;
+  }
+
+  if (itype === 'error' || t === 'error') {
+    const msg = item.message || ev.message || '';
+    if (msg) emit({ type: 'status', text: `Codex: ${String(msg).slice(0, 300)}` });
     return;
   }
 
