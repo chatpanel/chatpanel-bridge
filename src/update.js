@@ -24,6 +24,18 @@ const LATEST_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 const CHECK_EVERY_MS = 6 * 60 * 60 * 1000; // 6h
 const CACHE = path.join(os.homedir(), '.chatpanel', 'update-check.json');
 const UA = { 'User-Agent': 'chatpanel-bridge-updater' };
+// THIS CHECK RUNS INSIDE /health. Every client heartbeat — the extension, the desktop's
+// supervisor, the gateway's model list — waits on it. An un-timed fetch to GitHub therefore
+// made every one of them wait for a VPN to give up on api.github.com, and the desktop gives a
+// health answer 2.5s before calling the bridge dead. So: a short timeout, and after a failure
+// no retry for a while — a failed check that was re-attempted on every call kept the stall
+// going for as long as the network was bad.
+const FETCH_TIMEOUT_MS = Math.max(500, Number(process.env.CHATPANEL_UPDATE_TIMEOUT_MS) || 5000);
+const RETRY_AFTER_FAILURE_MS = 10 * 60 * 1000; // 10min
+let lastFailure = { at: 0, error: '' };
+
+/** Test seam: forget the last failure so the next unforced check reaches the network. */
+export function resetUpdateBackoff() { lastFailure = { at: 0, error: '' }; }
 
 // Release asset name for THIS platform (matches release-binaries.yml outputs).
 // macOS publishes arm64 only; Intel Macs use `npx` (managed → no self-update).
@@ -95,20 +107,33 @@ export async function checkForUpdate(current, { force = false } = {}) {
   if (!force && cache && Date.now() - cache.checkedAt < CHECK_EVERY_MS) {
     latest = cache.latest;
     assetUrl = cache.assetUrl;
+  } else if (!force && lastFailure.at && Date.now() - lastFailure.at < RETRY_AFTER_FAILURE_MS) {
+    // The network said no a moment ago. Asking again on every health poll would make every
+    // poll as slow as the failure; the answer is what it was, and says so.
+    error = lastFailure.error;
+    fallBackToCache();
   } else {
     try {
-      const res = await fetch(LATEST_API, { headers: { Accept: 'application/vnd.github+json', ...UA } });
+      const res = await fetch(LATEST_API, {
+        headers: { Accept: 'application/vnd.github+json', ...UA },
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
       if (res.ok) {
         const data = await res.json();
         latest = parseVersion(data.tag_name) || parseVersion(data.name);
         assetUrl = want ? (data.assets || []).find((a) => a.name === want)?.browser_download_url || null : null;
         await writeCache({ checkedAt: Date.now(), latest, assetUrl });
+        lastFailure = { at: 0, error: '' };
       } else {
         error = res.status === 403 ? 'GitHub rate limit (60/hour per IP) — try again later' : `HTTP ${res.status}`;
+        lastFailure = { at: Date.now(), error };
         fallBackToCache();
       }
     } catch (e) {
-      error = e?.message || String(e);
+      error = e?.name === 'TimeoutError' || e?.name === 'AbortError'
+        ? `GitHub did not answer within ${Math.round(FETCH_TIMEOUT_MS / 1000)}s`
+        : e?.message || String(e);
+      lastFailure = { at: Date.now(), error };
       fallBackToCache();
     }
   }
