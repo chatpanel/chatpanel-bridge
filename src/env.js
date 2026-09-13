@@ -226,7 +226,10 @@ function commandInWsl(name) {
 
 // Turn a launch spec + CLI args into a concrete [bin, argv, opts] for spawn().
 // `cwd` is the resolved working dir (a Windows path on win32), or null for home.
-export function buildSpawnSpec(spec, args, cwd) {
+export function buildSpawnSpec(spec, args, cwd, env = null) {
+  // `env` is what ONE run adds — a git credential scoped to a host, the pre-push leash
+  // (connections.js, worktree.js). Merged over the process env, never into it.
+  const runEnv = env && typeof env === 'object' && Object.keys(env).length ? { ...process.env, ...env } : process.env;
   if (spec.kind === 'wsl') {
     // Run inside WSL's login shell so nvm/etc. PATH resolves the tool. The
     // `exec <cmd> "$@"` + 'chatpanel' ($0) trick passes our args through as a
@@ -237,13 +240,13 @@ export function buildSpawnSpec(spec, args, cwd) {
       if (wslCwd) pre.push('--cd', wslCwd); // else: run in WSL home
     }
     const argv = [...pre, '-e', 'bash', '-lic', `exec ${spec.command} "$@"`, 'chatpanel', ...args];
-    return ['wsl.exe', argv, { stdio: ['pipe', 'pipe', 'pipe'], env: process.env, windowsHide: true, ...spawnGroupOpts }];
+    return ['wsl.exe', argv, { stdio: ['pipe', 'pipe', 'pipe'], env: runEnv, windowsHide: true, ...spawnGroupOpts }];
   }
   // Every spawned CLI leads its own process group, so Stop can signal the whole tree. An
   // agent CLI is not one process — it runs shell commands and tools of its own — and killing
   // only the pid we hold leaves those running after the user has stopped the turn.
   const opts = {
-    cwd: cwd || os.homedir(), stdio: ['pipe', 'pipe', 'pipe'], env: process.env, windowsHide: true,
+    cwd: cwd || os.homedir(), stdio: ['pipe', 'pipe', 'pipe'], env: runEnv, windowsHide: true,
     ...spawnGroupOpts,
   };
   if (spec.kind === 'script') return [process.execPath, [spec.script, ...args], opts];

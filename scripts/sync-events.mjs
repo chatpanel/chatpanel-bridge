@@ -26,9 +26,14 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 // the invocation contract it validates against, and `reach.js` is the ladder that caps a
 // paired phone. `reach.js` exists as its own module for exactly this reason — the ladder is
 // three strings, and taking it out of `router.js` would have vendored 50 KB of model routing.
+// `scm-connection.js` (architecture-pillars.md §14) is the third group: the connection
+// record a client keeps, the remote → connection match, a job's branch name and the
+// process-scoped credential environment — dependency-free, and the bridge is the one
+// process that hands a token to git.
 const FILES = [
   'scopes.js', 'skill-manifest.js', 'skill-scan.js',
   'ref.js', 'event.js', 'view.js', 'capability.js', 'reach.js',
+  'scm-connection.js',
 ];
 
 function pkgDir() {

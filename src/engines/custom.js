@@ -570,7 +570,7 @@ export async function runSpec(spec, { messages, system, options = {}, images }, 
     args.push(...imageTokens); // stdin prompt: image tokens go on argv
   }
 
-  const [bin, argv, opts] = buildSpawnSpec(resolved, args, cwd);
+  const [bin, argv, opts] = buildSpawnSpec(resolved, args, cwd, options.runEnv || null);
   // Discourage CLIs from colourizing output (kiro-cli etc.) when piped.
   opts.env = { ...(opts.env || process.env), NO_COLOR: '1', FORCE_COLOR: '0', CLICOLOR: '0', TERM: 'dumb' };
 

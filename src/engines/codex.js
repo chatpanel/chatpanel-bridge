@@ -297,7 +297,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
 
   // Default: use the user's skills/config. Opt-out → isolated home.
   const useLocal = options.useLocalConfig !== false;
-  const env = { ...process.env };
+  const env = { ...process.env, ...(options.runEnv || {}) };
   if (!useLocal) {
     const home = ensureIsolatedHome();
     if (home) env.CODEX_HOME = home;

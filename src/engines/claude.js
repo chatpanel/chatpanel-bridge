@@ -171,10 +171,10 @@ export function claudeMcpConfig(mcp) {
 // Spawn claude (however it resolves) and stream its stream-json output via
 // `emit`. Resolves with { streamedAny, resultText } once it closes 0. Returns
 // null (no spawn) when claude can't be resolved, so the caller can fall back.
-function runClaude({ prompt, args, cwd, emit, signal }) {
+function runClaude({ prompt, args, cwd, env = null, emit, signal }) {
   const spec = resolveClaude();
   if (!spec) return null;
-  const [bin, argv, opts] = buildSpawnSpec(spec, args, cwd);
+  const [bin, argv, opts] = buildSpawnSpec(spec, args, cwd, env);
 
   return new Promise((resolve, reject) => {
     let child;
@@ -413,7 +413,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
   // Never let caller-supplied extras re-open the read-only boundary the mode flags
   // above establish (shared sanitizer — see args.js).
   pushExtraArgs(args, options.extraArgs, FORBIDDEN.claude, emit);
-  const run = runClaude({ prompt, args, cwd, emit, signal });
+  const run = runClaude({ prompt, args, cwd, env: options.runEnv || null, emit, signal });
   if (run === null) {
     cleanup(); // SDK fallback doesn't take images yet
     return sdkChat({ messages, system, options }, emit, { signal });

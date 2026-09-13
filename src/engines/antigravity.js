@@ -166,7 +166,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
     const args = structured ? [...baseArgs, '--output-format', 'stream-json'] : baseArgs;
     let child;
     try {
-      child = spawn('agy', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env }, ...spawnGroupOpts });
+      child = spawn('agy', args, { cwd, stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, ...(options.runEnv || {}) }, ...spawnGroupOpts });
     } catch (e) {
       return reject(new Error(`Failed to start agy: ${e.message}`));
     }

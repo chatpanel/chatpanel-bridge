@@ -12,11 +12,17 @@
 //                     {type:'workdir', path, isDefault}  where this run writes
 //                     {type:'scm', phase:'before'|'after', repo, remote?, branch, head, commits?}
 //                                              the checkout it worked in, when it is one
+//                     {type:'workspace', path, branch, base, created, connection?}
+//                                              the worktree the run was given (options.workspace)
 //                     {type:'done',  text?}    (text only if not streamed)
 //                     {type:'error', error}
 //   POST /v1/chat/completions, /v1/completions, /v1/responses
 //                 → OpenAI-compatible text adapters for the local agents
 //   POST /v1/messages → Anthropic-compatible text adapter for the local agents
+//   GET  /connections         → SCM connections on this machine (records; never a token)
+//   POST /connections         → { connection, token? } save one; the token goes to the keychain
+//   POST /connections/<id>/test { remote? } · POST /connections/<id>/delete
+//   GET  /worktrees           → the job worktrees the bridge made · POST /worktrees/remove
 //   GET  /skills              → skill packages on disk (name + description + files)
 //   GET  /skills/<name>       → one skill, SKILL.md body included
 //   GET  /skills/<name>/file/<path> → one reference/template/asset from that package
@@ -43,6 +49,8 @@ import { skillIndex, listRecords, readRecord, readPackageFile, skillsHealth, qua
 import { capabilityToolSpecs, runCapabilityTool } from './mcp-capabilities.js';
 import { DEFAULT_WORKSPACE, isDefaultWorkdir, resolveWorkdir, writeScopeNote } from './workdir.js';
 import { gitState, gitDelta } from './scm.js';
+import { listConnections, putConnection, removeConnection, runEnvFor, testConnection, secretBackend } from './connections.js';
+import { worktreeFor, listWorktrees, removeWorktree, withHook, WORKTREE_ROOT } from './worktree.js';
 import { AGENT_CLIS, enrichPath, enrichAgentEnv, findAgentBin, resolveCommand } from './env.js';
 import { stripHidden } from './sanitize.js';
 import { checkForUpdate, selfUpdate } from './update.js';
@@ -70,7 +78,7 @@ import {
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.11.17';
+const VERSION = '0.11.19';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -339,6 +347,10 @@ const PRIVILEGED_POST = new Set([
   '/channels/unpair',
   '/channels/settings',
   '/channels/disconnect',
+  // An SCM connection holds a token for this machine's git; a worktree is a checkout the
+  // bridge makes. Both are as privileged as /chat.
+  '/connections',
+  '/worktrees',
 ]);
 // /channels is NOT here, for the same reason /skills is not, and it was a regression to add
 // it: a privileged GET is unreachable from the extension. The panel holds `<all_urls>`, so
@@ -448,6 +460,8 @@ async function handleHealth(res) {
   json(res, 200, {
     ok: true, version: VERSION, agents, update,
     workspace: DEFAULT_WORKSPACE,
+    // Where job worktrees go and where a connection's token is kept — additive.
+    worktrees: WORKTREE_ROOT, secretBackend: secretBackend(),
     // WHO STARTED THIS PROCESS — additive. ChatPanel Desktop sets CHATPANEL_MANAGED_BY=desktop on
     // the login service it registers; a client can then say so instead of offering install.sh.
     ...(process.env.CHATPANEL_MANAGED_BY ? { managedBy: String(process.env.CHATPANEL_MANAGED_BY).slice(0, 32) } : {}),
@@ -579,11 +593,21 @@ async function handleChat(req, res) {
   // AND WHICH CHECKOUT, when the directory is one (scm.js): the repo, branch and HEAD before
   // the agent starts, and after it ends what moved — so the team runner can put "worked on
   // cp/p/j, 2 commits" on the task and the agent's record, not "it said it committed".
-  const workdir = resolveWorkdir(body.options?.workingDir);
+  // A JOB'S WORKTREE, when the run names one (architecture-pillars.md §14.2):
+  // options.workspace = { repo, projectId, jobId, base? } → a checkout of its own on
+  // cp/<project>/<job>, which becomes the working directory. A worktree that cannot be
+  // made ends the run here — an Implementer must not fall back to the main checkout.
+  let workspace = null;
+  if (body.options?.workspace && typeof body.options.workspace === 'object') {
+    const w = body.options.workspace;
+    workspace = await worktreeFor({ repo: w.repo, projectId: w.projectId, jobId: w.jobId, base: w.base || null });
+    if (workspace.error) { emit({ type: 'error', error: `workspace: ${workspace.error}` }); endRun(runId); if (!res.writableEnded) res.end(); return; }
+  }
+  const workdir = workspace ? workspace.path : resolveWorkdir(body.options?.workingDir);
   let scmBefore = null;
   {
     const dir = workdir;
-    const chosen = !isDefaultWorkdir(body.options?.workingDir);
+    const chosen = !!workspace || !isDefaultWorkdir(body.options?.workingDir);
     const scope = writeScopeNote(body.agent, body.options?.permissionMode, dir);
     emit({ type: 'workdir', path: dir, isDefault: !chosen, writeScope: scope || undefined });
     emit({ type: 'status', text: `Working in ${dir}${chosen ? '' : ' (default)'}` });
@@ -591,10 +615,23 @@ async function handleChat(req, res) {
     scmBefore = await gitState(dir);
     if (scmBefore) emit({ type: 'scm', phase: 'before', ...scmBefore });
   }
+  // THE CREDENTIAL AND THE LEASH, for this process only (connections.js, worktree.js): the
+  // token of the connection that matches the checkout's remote, scoped to its host in the
+  // spawned process's environment; the pre-push hook that keeps a push on the job's own
+  // branch, or refuses every push when the role has no scm:push. Nothing is written to the
+  // repository or the user's git config. Said on the stream, minus the secret.
+  let runEnv = null;
+  if (scmBefore || workspace) {
+    const grants = Array.isArray(body.options?.grants) ? body.options.grants : [];
+    const { env, connection } = runEnvFor({ remote: scmBefore?.remote || null, grants, branch: workspace?.branch || null, connectionId: body.options?.connectionId || null });
+    runEnv = withHook(env);
+    if (workspace) emit({ type: 'workspace', path: workspace.path, branch: workspace.branch, base: workspace.base, created: workspace.created, repo: workspace.repo, ...(connection ? { connection } : {}) });
+    if (connection) emit({ type: 'status', text: `Git credential: ${connection.kind} · ${connection.host}${connection.hasSecret ? '' : ' (no token stored)'} · push: ${env.CHATPANEL_SCM_PUSH === 'own' ? `${workspace?.branch} only` : env.CHATPANEL_SCM_PUSH}` });
+  }
 
   // Browser-tools relay: when the extension sends page-tool specs, host an MCP
   // server for this turn and tell the engine to point the CLI at it.
-  const options = { ...(body.options || {}) };
+  const options = { ...(body.options || {}), ...(workspace ? { workingDir: workspace.path } : {}), ...(runEnv ? { runEnv } : {}) };
   let session = null;
   if (body.pageTools?.specs?.length) {
     session = createSession(safeEmit, body.pageTools.specs);
@@ -631,6 +668,38 @@ async function handleChat(req, res) {
     if (session) deleteSession(session.id);
     if (!res.writableEnded) res.end();
   }
+}
+
+// --- SCM connections and job worktrees (architecture-pillars.md §14) ---------------------
+// GET is open like /skills (the panel's GET carries no Origin); every write is a POST and
+// privileged. A token arrives in a POST body once, goes to the keychain, and is never
+// returned — a client learns only `hasSecret`.
+async function handleConnections(req, res, pathname) {
+  if (req.method === 'GET' && pathname === '/connections') return json(res, 200, { ok: true, connections: listConnections(), secretBackend: secretBackend() });
+  if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+  const body = await readBody(req);
+  if (pathname === '/connections') {
+    try { return json(res, 200, { ok: true, connection: putConnection(body.connection || body, { token: body.token || null }) }); }
+    catch (e) { return json(res, 400, { error: String(e?.message || e) }); }
+  }
+  const m = /^\/connections\/([a-zA-Z0-9_-]{1,64})\/(test|delete)$/.exec(pathname);
+  if (!m) return json(res, 404, { error: 'Not found' });
+  if (m[2] === 'delete') return json(res, 200, { ok: removeConnection(m[1]) });
+  return json(res, 200, testConnection(m[1], body.remote || ''));
+}
+async function handleWorktrees(req, res, pathname) {
+  if (req.method === 'GET' && pathname === '/worktrees') return json(res, 200, { ok: true, root: WORKTREE_ROOT, worktrees: await listWorktrees() });
+  if (req.method !== 'POST') return json(res, 405, { error: 'method not allowed' });
+  const body = await readBody(req);
+  if (pathname === '/worktrees') {
+    const r = await worktreeFor({ repo: body.repo, projectId: body.projectId, jobId: body.jobId, base: body.base || null });
+    return json(res, r.error ? 400 : 200, r.error ? { error: r.error } : { ok: true, ...r });
+  }
+  if (pathname === '/worktrees/remove') {
+    const r = await removeWorktree({ projectId: body.projectId, jobId: body.jobId, force: !!body.force });
+    return json(res, r.ok ? 200 : 400, r);
+  }
+  return json(res, 404, { error: 'Not found' });
 }
 
 async function runCompatibleAgent(config, onDelta, res) {
@@ -1179,6 +1248,8 @@ const server = createServer(async (req, res) => {
         extraDirs,
       );
     }
+    if (url.pathname === '/connections' || url.pathname.startsWith('/connections/')) return handleConnections(req, res, url.pathname);
+    if (url.pathname === '/worktrees' || url.pathname.startsWith('/worktrees/')) return handleWorktrees(req, res, url.pathname);
     if (req.method === 'GET' && url.pathname === '/v1/models') return handleCompatibleModels(res);
     if (req.method === 'GET' && url.pathname.startsWith('/v1/models/')) {
       return handleCompatibleModels(res, decodeURIComponent(url.pathname.slice('/v1/models/'.length)));
