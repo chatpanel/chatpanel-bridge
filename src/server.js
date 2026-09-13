@@ -10,6 +10,8 @@
 //                     {type:'tool',  name, summary}
 //                     {type:'status'|'reasoning', text?}
 //                     {type:'workdir', path, isDefault}  where this run writes
+//                     {type:'scm', phase:'before'|'after', repo, remote?, branch, head, commits?}
+//                                              the checkout it worked in, when it is one
 //                     {type:'done',  text?}    (text only if not streamed)
 //                     {type:'error', error}
 //   POST /v1/chat/completions, /v1/completions, /v1/responses
@@ -40,6 +42,7 @@ import { installService, uninstallService, serviceStatus, restartService } from 
 import { skillIndex, listRecords, readRecord, readPackageFile, skillsHealth, quarantinedSkills } from './skills.js';
 import { capabilityToolSpecs, runCapabilityTool } from './mcp-capabilities.js';
 import { DEFAULT_WORKSPACE, isDefaultWorkdir, resolveWorkdir, writeScopeNote } from './workdir.js';
+import { gitState, gitDelta } from './scm.js';
 import { AGENT_CLIS, enrichPath, enrichAgentEnv, findAgentBin, resolveCommand } from './env.js';
 import { stripHidden } from './sanitize.js';
 import { checkForUpdate, selfUpdate } from './update.js';
@@ -573,13 +576,20 @@ async function handleChat(req, res) {
   // a temp folder the OS clears on its own schedule. Now there is one answer and it is
   // announced. Additive: a client that does not know `workdir` ignores it, and the same
   // information is repeated as a `status` line, which every client already renders.
+  // AND WHICH CHECKOUT, when the directory is one (scm.js): the repo, branch and HEAD before
+  // the agent starts, and after it ends what moved — so the team runner can put "worked on
+  // cp/p/j, 2 commits" on the task and the agent's record, not "it said it committed".
+  const workdir = resolveWorkdir(body.options?.workingDir);
+  let scmBefore = null;
   {
-    const dir = resolveWorkdir(body.options?.workingDir);
+    const dir = workdir;
     const chosen = !isDefaultWorkdir(body.options?.workingDir);
     const scope = writeScopeNote(body.agent, body.options?.permissionMode, dir);
     emit({ type: 'workdir', path: dir, isDefault: !chosen, writeScope: scope || undefined });
     emit({ type: 'status', text: `Working in ${dir}${chosen ? '' : ' (default)'}` });
     if (scope) emit({ type: 'status', text: scope });
+    scmBefore = await gitState(dir);
+    if (scmBefore) emit({ type: 'scm', phase: 'before', ...scmBefore });
   }
 
   // Browser-tools relay: when the extension sends page-tool specs, host an MCP
@@ -610,6 +620,13 @@ async function handleChat(req, res) {
     log('error', `${body.agent} chat failed: ${e?.message || e}`);
     emit({ type: 'error', error: e?.message || String(e) });
   } finally {
+    // What the run left in the checkout — said before the stream closes, so a client that
+    // already has the answer still gets the commits. A run that was cancelled is looked at
+    // too: the commits it made before Stop are real.
+    if (!closed) {
+      const after = await gitDelta(workdir, scmBefore).catch(() => null);
+      if (after) safeEmit({ type: 'scm', phase: 'after', ...after });
+    }
     endRun(runId);
     if (session) deleteSession(session.id);
     if (!res.writableEnded) res.end();
