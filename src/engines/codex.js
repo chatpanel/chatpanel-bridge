@@ -244,7 +244,7 @@ function runCodex({ args, cwd, env, prompt, outFile, emit, signal }) {
         /* no message file */
       }
       unlink(outFile).catch(() => {});
-      resolve({ code, stderr, text, streamed, policyBlocked: !!evState.policyBlocked });
+      resolve({ code, stderr, text, streamed, said: !!evState.saidAny, policyBlocked: !!evState.policyBlocked });
     });
 
     child.stdin.write(prompt);
@@ -334,7 +334,8 @@ export async function chat({ messages, system, options, images }, emit, { signal
 
     if (signal?.aborted) return; // Stop pressed — end quietly, no error
     if (result.code !== 0) throw new Error(summarizeCliError('Codex', result.code, result.stderr, '', { agentId: 'codex' }));
-    emit({ type: 'delta', text: result.text || '(no output)' });
+    // Said already, message by message (forwardEvent); the file is the fallback, not a repeat.
+    if (!result.said) emit({ type: 'delta', text: result.text || '(no output)' });
     emit({ type: 'done', text: '' });
   } finally {
     cleanupImages();
@@ -348,7 +349,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
 //   command_execution: { id, command, aggregated_output, exit_code, status }
 //   reasoning:         { id, text }            (only some models/efforts emit it)
 //   file_change:       { id, changes:[{path}] }
-//   agent_message:     { id, text }            (the answer — read from -o outFile at close)
+//   agent_message:     { id, text }            (the answer, a delta per message; -o outFile is the fallback)
 //   web_search:        { id, query, action:{ type, query?, url? } }   (codex-cli 0.154)
 //   mcp_tool_call:     { id, server, tool, arguments, result?, error?, status }
 //   todo_list:         { id, items:[{ text, completed }] }
@@ -357,6 +358,23 @@ export function forwardEvent(ev, emit, state = { started: new Set(), reasoned: n
   const item = ev.item || {};
   const itype = item.type || '';
   const completed = t === 'item.completed' || item.status === 'completed' || item.status === 'failed';
+
+  // THE ANSWER, AS IT IS WRITTEN. `codex exec --json` streams no tokens: each agent_message
+  // arrives whole, and a turn that thinks, runs a command and then concludes writes TWO of
+  // them. Reading only `-o outFile` at close kept the LAST one and showed it once the process
+  // had exited — the first sentence was lost and the panel sat blank for the whole run. Each
+  // message is a delta the moment it completes; the close reads the file only when nothing
+  // was said this way (an older codex, or a run that ended before its message).
+  if (itype === 'agent_message' && completed) {
+    const id = item.id || `msg_${state.n++}`;
+    const text = String(item.text || '');
+    if (text && !state.said?.has(id)) {
+      (state.said ||= new Set()).add(id);
+      emit({ type: 'delta', text: `${state.saidAny ? '\n\n' : ''}${text}` });
+      state.saidAny = true;
+    }
+    return;
+  }
 
   if (itype === 'command_execution' || (!itype && t.includes('command'))) {
     const id = item.id || `cmd_${state.n++}`;

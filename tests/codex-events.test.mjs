@@ -112,3 +112,20 @@ test('the managed-requirements warning is said once, in a sentence, and remember
   assert.doesNotMatch(out[0].text, /enterprise-managed|Details:/, 'the paragraph is gone');
   assert.equal(state.policyBlocked, true, 'remembered, so the next run stops passing the flag');
 });
+
+test('each agent_message is a delta the moment it completes — a turn that speaks, runs a command, then concludes streams both halves, in order, once', () => {
+  const out = run([
+    { type: 'turn.started' },
+    { type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'The sea shimmers.' } },
+    { type: 'item.started', item: { id: 'item_1', type: 'command_execution', command: '/bin/zsh -lc "echo hi"', status: 'in_progress' } },
+    { type: 'item.completed', item: { id: 'item_1', type: 'command_execution', command: '/bin/zsh -lc "echo hi"', aggregated_output: 'hi\n', exit_code: 0, status: 'completed' } },
+    // Codex repeats an item id across started/updated/completed; the message is said once.
+    { type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'The sea shimmers.' } },
+    { type: 'item.completed', item: { id: 'item_2', type: 'agent_message', text: '```text\nhi\n```' } },
+    { type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } },
+  ]);
+  const deltas = out.filter((e) => e.type === 'delta').map((e) => e.text);
+  assert.deepEqual(deltas, ['The sea shimmers.', '\n\n```text\nhi\n```']);
+  const kinds = out.map((e) => e.type);
+  assert.ok(kinds.indexOf('delta') < kinds.indexOf('tool'), 'the first sentence is on screen before the command runs');
+});
