@@ -53,9 +53,14 @@ export function isCompiledBinary() {
 export function selfMcpStdio(url) {
   const args = ['--mcp-stdio', url];
   if (isCompiledBinary()) return { command: process.execPath, args };
-  // Node/Bun: re-run this same entry script (server.js) under the same runtime.
+  // Node/Bun: re-run this same entry script under the same runtime. Embedded in the
+  // gateway (CHATPANEL_BRIDGE_EMBEDDED=1) that script is the GATEWAY's bin, which only
+  // hands argv to us behind its `--bridge` flag — without it the gateway CLI answers
+  // "unknown option: --mcp-stdio", the proxy exits 2, and every CLI agent sees the
+  // per-turn ChatPanel tools as "Connection closed".
   const entry = process.argv[1] || path.join(process.cwd(), 'src', 'server.js');
-  return { command: process.execPath, args: [entry, ...args] };
+  const via = process.env.CHATPANEL_BRIDGE_EMBEDDED === '1' ? ['--bridge'] : [];
+  return { command: process.execPath, args: [entry, ...via, ...args] };
 }
 
 // Ask the user's login shell to locate a command — no hardcoded locations, works
