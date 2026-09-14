@@ -19,6 +19,9 @@ import path from 'node:path';
 import { chmod, rename, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { isCompiledBinary } from './env.js';
 
+/** Started by the gateway from its own binary — never self-updates, never registers a service. */
+export function isEmbedded() { return process.env.CHATPANEL_BRIDGE_EMBEDDED === '1'; }
+
 const REPO = 'chatpanel/chatpanel-bridge';
 const LATEST_API = `https://api.github.com/repos/${REPO}/releases/latest`;
 const CHECK_EVERY_MS = 6 * 60 * 60 * 1000; // 6h
@@ -165,6 +168,12 @@ export async function checkForUpdate(current, { force = false } = {}) {
 // its HTTP response first, then triggers restartService(). Throws on any failure,
 // leaving the running binary untouched.
 export async function selfUpdate(current) {
+  // A bridge the gateway runs from inside its own binary (CHATPANEL_BRIDGE_EMBEDDED=1) has
+  // `process.execPath` = the GATEWAY binary. Swapping "itself" would overwrite the gateway
+  // with a bridge — the one update this code must never perform.
+  if (isEmbedded()) {
+    throw new Error('This bridge runs inside the ChatPanel Gateway. Update the gateway instead (it carries the bridge).');
+  }
   if (!isCompiledBinary()) {
     throw new Error('Self-update applies only to the standalone binary. Update the npm/npx version with npm.');
   }

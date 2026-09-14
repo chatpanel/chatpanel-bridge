@@ -53,7 +53,7 @@ import { listConnections, putConnection, removeConnection, runEnvFor, testConnec
 import { worktreeFor, listWorktrees, removeWorktree, withHook, WORKTREE_ROOT } from './worktree.js';
 import { AGENT_CLIS, enrichPath, enrichAgentEnv, findAgentBin, resolveCommand } from './env.js';
 import { stripHidden } from './sanitize.js';
-import { checkForUpdate, selfUpdate } from './update.js';
+import { checkForUpdate, selfUpdate, isEmbedded } from './update.js';
 import { callLocalMcp } from './mcp-local.js';
 import { assertPublicHttpUrl, assertPublicWebUrl } from './ssrf.js';
 import { startRun, endRun, cancelRun, cancelAll, activeRuns } from './runs.js';
@@ -78,7 +78,7 @@ import {
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.11.19';
+const VERSION = '0.11.20';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -450,7 +450,10 @@ async function handleHealth(res) {
         return { id, label, available: a.ok, reason: a.reason, connectors };
       }),
   );
-  const update = await checkForUpdate(VERSION).catch(() => ({ current: VERSION, updateAvailable: false }));
+  // A bridge embedded in the gateway is whatever version the gateway shipped: the gateway's
+  // update is its update, so the check is not made and no client offers to update it here.
+  const update = isEmbedded() ? { current: VERSION, updateAvailable: false, embedded: 'gateway' }
+    : await checkForUpdate(VERSION).catch(() => ({ current: VERSION, updateAvailable: false }));
   // ADDITIVE, and the client's only way to know this bridge can host skill packages —
   // an older bridge simply omits it, which is what stops a newer extension assuming the
   // endpoints exist. Never let a scan failure cost the caller its health check.

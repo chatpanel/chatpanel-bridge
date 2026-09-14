@@ -110,3 +110,13 @@ test('a forced check ignores the back-off — the user pressed the button', asyn
   resetUpdateBackoff();
   assert.equal(calls, 2);
 });
+
+test('a bridge embedded in the gateway never swaps "its own" binary — that would be the gateway', async () => {
+  const { selfUpdate, isEmbedded } = await import('../src/update.js');
+  process.env.CHATPANEL_BRIDGE_EMBEDDED = '1';
+  try {
+    assert.equal(isEmbedded(), true);
+    await assert.rejects(selfUpdate('0.0.1'), /runs inside the ChatPanel Gateway/);
+  } finally { delete process.env.CHATPANEL_BRIDGE_EMBEDDED; }
+  assert.equal(isEmbedded(), false);
+});
