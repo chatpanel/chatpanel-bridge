@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, symlinkSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { findAgentBin, selfMcpStdio, resolveCommand } from '../env.js';
+import { relayTimeoutMax } from '../relay-timeout.js';
 import { buildCliPrompt } from './prompt.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
 import { resolveWorkdir } from '../workdir.js';
@@ -117,7 +118,8 @@ export function codexMcpConfigArgs(mcp) {
     '-c',
     `mcp_servers.${name}.startup_timeout_sec=30`,
     '-c',
-    `mcp_servers.${name}.tool_timeout_sec=120`,
+    // Matches the relay's longest tool (a team run's budget) — see relay-timeout.js.
+    `mcp_servers.${name}.tool_timeout_sec=${Math.ceil(relayTimeoutMax(mcp.specs) / 1000)}`,
   ];
   const toolNames = [...new Set((mcp.specs || []).map((s) => s?.name).filter(Boolean))];
   if (toolNames.length) {

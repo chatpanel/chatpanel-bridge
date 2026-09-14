@@ -23,6 +23,7 @@ import { buildCliPrompt } from './prompt.js';
 import { summarizeCliError } from '../cli-errors.js';
 import { killOnAbort } from '../proc.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
+import { relayTimeoutMax } from '../relay-timeout.js';
 import { displayPath, resolveWorkdir } from '../workdir.js';
 import { connectorsFor } from '../connectors.js';
 
@@ -435,7 +436,11 @@ export async function chat({ messages, system, options, images }, emit, { signal
   // Never let caller-supplied extras re-open the read-only boundary the mode flags
   // above establish (shared sanitizer — see args.js).
   pushExtraArgs(args, options.extraArgs, FORBIDDEN.claude, emit);
-  const run = runClaude({ prompt, args, cwd, env: options.runEnv || null, emit, signal });
+  // The CLI's own MCP tool timeout matches the relay's longest tool (a team run's budget), or
+  // Claude Code gives up on the call before the bridge does. The user's own setting wins.
+  const mcpEnv = mcpConfig && !process.env.MCP_TOOL_TIMEOUT ? { MCP_TOOL_TIMEOUT: String(relayTimeoutMax(options.mcp?.specs)) } : null;
+  const runEnv = mcpEnv || options.runEnv ? { ...(options.runEnv || {}), ...(mcpEnv || {}) } : null;
+  const run = runClaude({ prompt, args, cwd, env: runEnv, emit, signal });
   if (run === null) {
     cleanup(); // SDK fallback doesn't take images yet
     return sdkChat({ messages, system, options }, emit, { signal });

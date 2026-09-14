@@ -47,6 +47,7 @@ import * as custom from './engines/custom.js';
 import { installService, uninstallService, serviceStatus, restartService } from './service.js';
 import { skillIndex, listRecords, readRecord, readPackageFile, skillsHealth, quarantinedSkills } from './skills.js';
 import { capabilityToolSpecs, runCapabilityTool } from './mcp-capabilities.js';
+import { relayTimeoutFor } from './relay-timeout.js';
 import { DEFAULT_WORKSPACE, isDefaultWorkdir, resolveWorkdir, writeScopeNote } from './workdir.js';
 import { gitState, gitDelta } from './scm.js';
 import { listConnections, putConnection, removeConnection, runEnvFor, testConnection, secretBackend } from './connections.js';
@@ -78,7 +79,7 @@ import {
 // Hardcoded (not read from package.json) so it survives Bun's single-file
 // --compile, where package.json isn't on a readable FS. CI fails the publish if
 // this drifts from package.json, so the two can't silently diverge.
-const VERSION = '0.11.22';
+const VERSION = '0.11.23';
 const HOST = process.env.CHATPANEL_BRIDGE_HOST || '127.0.0.1';
 const PORT = Number(process.env.CHATPANEL_BRIDGE_PORT) || 4319;
 
@@ -141,7 +142,7 @@ function relayToolCall(session, name, input) {
     const timer = setTimeout(() => {
       session.pending.delete(id);
       reject(new Error('tool call timed out'));
-    }, 120_000);
+    }, relayTimeoutFor(session.specs, name)); // a team run declares its budget; see relay-timeout.js
     session.pending.set(id, {
       resolve: (result) => { clearTimeout(timer); resolve(toMcpContent(result)); },
       reject: (e) => { clearTimeout(timer); reject(e); },

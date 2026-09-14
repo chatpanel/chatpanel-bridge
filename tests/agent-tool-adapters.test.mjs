@@ -143,3 +143,18 @@ test('Custom stable-MCP agents are not treated as OpenCode by default', () => {
   const customJs = readFileSync(new URL('../src/engines/custom.js', import.meta.url), 'utf8');
   assert.doesNotMatch(customJs, /\|\| !spec\.stableMcpConfigCheck/, 'Custom agents without a known check should not reuse the OpenCode config check.');
 });
+
+// A TOOL THAT DECLARES HOW LONG IT MAY TAKE. The relay and the CLIs' own MCP timeouts follow
+// one rule (relay-timeout.js): a 300 s team run declared 360 s, and every side waits that long.
+test('a declared timeoutMs stretches the relay and the CLIs\' MCP tool timeouts together', async () => {
+  const { relayTimeoutFor, relayTimeoutMax } = await import('../src/relay-timeout.js');
+  const specs = [...mcp.specs, { name: 'team', description: 'a team', timeoutMs: 360_000, parameters: { type: 'object', properties: {} } }];
+  assert.equal(relayTimeoutFor(specs, 'browser_click'), 120_000, 'no declaration: the two-minute default');
+  assert.equal(relayTimeoutFor(specs, 'team'), 360_000);
+  assert.equal(relayTimeoutFor([{ name: 'x', timeoutMs: 5_000 }], 'x'), 120_000, 'never under the default');
+  assert.equal(relayTimeoutFor([{ name: 'x', timeoutMs: 99 * 60_000 }], 'x'), 60 * 60_000, 'never over an hour');
+  assert.equal(relayTimeoutMax(specs), 360_000);
+  assert.equal(relayTimeoutMax(mcp.specs), 120_000);
+  const args = codexMcpConfigArgs({ ...mcp, specs });
+  assert(args.includes('mcp_servers.chatpanel_browser.tool_timeout_sec=360'), 'Codex waits as long as the relay');
+});
