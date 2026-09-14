@@ -18,6 +18,7 @@ import { writeFile, unlink } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { resolveClaude, buildSpawnSpec, isCompiledBinary, selfMcpStdio } from '../env.js';
+import { signInStatus, signInMessage, loginRequired } from '../sign-in.js';
 import { buildCliPrompt } from './prompt.js';
 import { summarizeCliError } from '../cli-errors.js';
 import { killOnAbort } from '../proc.js';
@@ -146,7 +147,12 @@ export async function available() {
       cachedOk = false;
     }
   }
-  return cachedOk ? { ok: true } : { ok: false, reason: lastReason };
+  if (!cachedOk) return { ok: false, reason: lastReason };
+  // Installed is not signed in. `claude auth status` says which, cheaply and before a turn is
+  // sent; only a clear "no" counts (sign-in.js), so an old CLI or a slow answer never blocks.
+  const signedIn = await signInStatus('claude', resolveClaude()).catch(() => null);
+  if (signedIn === false) return { ok: false, signedIn: false, reason: signInMessage('Claude Code', 'claude') };
+  return { ok: true };
 }
 
 // Claude Code has no "list models" command — it takes stable aliases (or full
@@ -189,6 +195,7 @@ function runClaude({ prompt, args, cwd, env = null, emit, signal }) {
     let stdout = '';
     let stderr = '';
     let streamedAny = false;
+    let apiError = null; // an API-level failure Claude reported as a message (not signed in, …)
     const flow = { sawText: false, tail: '', boundary: false };
     let resultText = '';
 
@@ -219,6 +226,7 @@ function runClaude({ prompt, args, cwd, env = null, emit, signal }) {
         const r = handleMessage(msg, emit, streamedAny, cwd, flow);
         if (r.streamed) streamedAny = true;
         if (r.result != null) resultText = r.result;
+        if (r.apiError) apiError = r.apiError;
       }
     });
     child.stderr.on('data', (d) => { armIdle(); stderr += d.toString(); });
@@ -231,8 +239,12 @@ function runClaude({ prompt, args, cwd, env = null, emit, signal }) {
       clearTimeout(idleTimer);
       detach();
       if (signal?.aborted) { resolve({ streamedAny, resultText }); return; } // Stop pressed — end quietly
+      // Not signed in arrives as an assistant message flagged `authentication_failed`, then
+      // exit 1. Say what to do — never "exited 1", and never the line as if it were the answer.
+      if (apiError && loginRequired(apiError)) return reject(new Error(signInMessage('Claude Code', 'claude')));
+      if (code === 0 && apiError) return reject(new Error(`Claude Code reported an error: ${apiError}`));
       if (code === 0) resolve({ streamedAny, resultText });
-      else reject(new Error(summarizeCliError('Claude Code', code, stderr)));
+      else reject(new Error(summarizeCliError('Claude Code', code, stderr, apiError || '', { agentId: 'claude' })));
     });
 
     child.stdin.write(prompt);
@@ -289,6 +301,13 @@ export function handleMessage(msg, emit, alreadyStreamed, cwdForSteps = '', flow
       }
     }
   } else if (msg.type === 'assistant') {
+    // An API error Claude Code phrases as an assistant message ("Not logged in · Please run
+    // /login", `error: 'authentication_failed'`, `is_api_error_message`). Not an answer: it is
+    // held for the close handler, which turns it into an instruction.
+    if (msg.is_api_error_message || msg.error) {
+      out.apiError = (msg.message?.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n') || String(msg.error || 'api error');
+      return out;
+    }
     for (const block of msg.message?.content || []) {
       if (block.type === 'tool_use') {
         if (flow) flow.boundary = true;
@@ -322,7 +341,10 @@ export function handleMessage(msg, emit, alreadyStreamed, cwdForSteps = '', flow
       });
     }
   } else if (msg.type === 'result') {
-    if (msg.subtype === 'success') out.result = msg.result || '';
+    // `is_error` rides on a `success` result when the API refused (not signed in): the text
+    // is the error, not the answer.
+    if (msg.is_error) out.apiError = out.apiError || String(msg.result || msg.subtype || 'error');
+    else if (msg.subtype === 'success') out.result = msg.result || '';
     else emit({ type: 'status', text: `(${msg.subtype})` });
     // Forward token usage so the client can account for CLI-agent turns. The
     // result message carries cumulative usage (+ a real subscription cost).

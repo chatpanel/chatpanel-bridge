@@ -12,6 +12,8 @@
 // it to DROP the offending server and run again, so the common cases never reach a human at
 // all. One set of patterns serves both — a second copy would drift.
 
+import { loginRequired, signInMessage } from './sign-in.js';
+
 const NOISE = [
   /^\s*$/,
   /^\s*at\s+/,            // stack frames
@@ -108,12 +110,18 @@ function knownCause(text) {
   return null;
 }
 
+const AGENT_IDS = { 'claude code': 'claude', claude: 'claude', codex: 'codex', 'github copilot': 'copilot', copilot: 'copilot', opencode: 'opencode', kiro: 'kiro', hermes: 'hermes', antigravity: 'antigravity', pi: 'pi' };
+
 /**
  * A short, actionable summary of why a CLI agent exited. Never returns markup, and never more
  * than a couple of lines — the full output stays in the bridge log for anyone debugging.
+ *
+ * "Not signed in" comes FIRST and drops the exit code: "Claude Code exited 1" read as a
+ * ChatPanel bug, when the whole story was that the user had never run `/login`.
  */
-export function summarizeCliError(label, code, stderr, stdout = '') {
+export function summarizeCliError(label, code, stderr, stdout = '', { agentId = null } = {}) {
   const raw = `${stderr || ''}\n${stdout || ''}`;
+  if (loginRequired(raw)) return signInMessage(label, agentId || AGENT_IDS[String(label).toLowerCase()] || null);
   const cause = knownCause(raw);
   if (cause) return `${label} exited ${code}: ${cause}`;
 

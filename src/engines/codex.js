@@ -20,11 +20,12 @@ import { readFile, unlink, writeFile } from 'node:fs/promises';
 import { existsSync, mkdirSync, symlinkSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { findAgentBin, selfMcpStdio } from '../env.js';
+import { findAgentBin, selfMcpStdio, resolveCommand } from '../env.js';
 import { buildCliPrompt } from './prompt.js';
 import { pushExtraArgs, FORBIDDEN } from './args.js';
 import { resolveWorkdir } from '../workdir.js';
 import { summarizeCliError } from '../cli-errors.js';
+import { signInStatus, signInMessage } from '../sign-in.js';
 import { disabledMcpServers, planMcpRetry, quarantine } from '../mcp-quarantine.js';
 
 // Idle timeout: re-armed on every stdout/stderr chunk, so a long run that keeps
@@ -95,9 +96,11 @@ export async function available() {
       installed = false;
     }
   }
-  return installed
-    ? { ok: true }
-    : { ok: false, reason: 'codex not found on PATH. Install it and run `codex login`.' };
+  if (!installed) return { ok: false, reason: 'codex not found on PATH. Install it and run `codex login`.' };
+  // Installed is not signed in: `codex login status` says which before a turn is sent (sign-in.js).
+  const signedIn = await signInStatus('codex', resolveCommand('codex')).catch(() => null);
+  if (signedIn === false) return { ok: false, signedIn: false, reason: signInMessage('Codex', 'codex') };
+  return { ok: true };
 }
 
 export function codexMcpConfigArgs(mcp) {
@@ -328,7 +331,7 @@ export async function chat({ messages, system, options, images }, emit, { signal
     }
 
     if (signal?.aborted) return; // Stop pressed — end quietly, no error
-    if (result.code !== 0) throw new Error(summarizeCliError('Codex', result.code, result.stderr));
+    if (result.code !== 0) throw new Error(summarizeCliError('Codex', result.code, result.stderr, '', { agentId: 'codex' }));
     emit({ type: 'delta', text: result.text || '(no output)' });
     emit({ type: 'done', text: '' });
   } finally {
